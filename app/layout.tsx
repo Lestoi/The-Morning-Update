@@ -13,3 +13,6 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     </html>
   );
 }
+/* Hard-enforce black background + light text */
+:root { color-scheme: dark; }
+html, body { background:#0a0a0a; color:#e5e5e5; }

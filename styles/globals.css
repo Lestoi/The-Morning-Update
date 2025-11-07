@@ -1,2 +1,4 @@
 :root { color-scheme: dark; }
 body { background:#0a0a0a; color:#e5e5e5; font-family: system-ui, Segoe UI, Roboto, Arial; }
+table { border-collapse: separate; border-spacing: 0; }
+td, th { line-height: 1.4; }

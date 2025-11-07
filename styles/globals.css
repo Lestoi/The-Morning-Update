@@ -1,4 +1,4 @@
-:root { color-scheme: dark; }
-body { background:#0a0a0a; color:#e5e5e5; font-family: system-ui, Segoe UI, Roboto, Arial; }
+/* more breathing room + zebra rows */
 table { border-collapse: separate; border-spacing: 0; }
-td, th { line-height: 1.4; }
+th, td { line-height: 1.6; }
+tbody tr:nth-child(odd) { background: rgba(255,255,255,0.02); }

@@ -1,44 +1,75 @@
 export const dynamic = "force-dynamic";
 
 /**
- * Total market Put/Call Ratio (daily, most recent).
- * Tries a few known Cboe CSV endpoints; returns { pcr:number|null, asOf?:string }.
- * If all sources fail, returns pcr=null (UI will show "—").
+ * Total market Put/Call Ratio (daily).
+ * We try several public CSV/HTML endpoints (Cboe & mirrors). We parse the most
+ * recent numeric and return { pcr, asOf }. If everything fails we return nulls.
  */
-async function fetchFromCandidates(): Promise<{ pcr: number | null; asOf?: string }> {
-  const candidates = [
-    // Common Cboe CSV endpoints seen historically; format: date,value
+type PcrResult = { pcr: number | null; asOf?: string | null; source?: string; stale?: boolean };
+
+function parseLastNumericLine(text: string): { value: number | null; date?: string | null } {
+  const lines = text.trim().split(/\r?\n/).filter(Boolean);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const cols = lines[i].split(/,|;|\t/).map(s => s.trim());
+    if (cols.length < 2) continue;
+    const raw = cols[cols.length - 1];
+    const num = Number(String(raw).replace(/[^\d.\-]/g, ""));
+    if (isFinite(num) && num > 0 && num < 10) {
+      const maybeDate = cols[0];
+      return { value: Number(num.toFixed(2)), date: maybeDate || null };
+    }
+  }
+  return { value: null, date: null };
+}
+
+async function tryCsv(url: string): Promise<PcrResult> {
+  const r = await fetch(url, { cache: "no-store", headers: { "User-Agent": "Mozilla/5.0" } });
+  if (!r.ok) throw new Error("bad status");
+  const text = await r.text();
+  const { value, date } = parseLastNumericLine(text);
+  if (value == null) throw new Error("no value");
+  return { pcr: value, asOf: date ?? null, source: url, stale: false };
+}
+
+/** Very liberal HTML fallback: scan page for a float like 0.83, 1.04 etc. */
+async function tryHtml(url: string): Promise<PcrResult> {
+  const r = await fetch(url, { cache: "no-store", headers: { "User-Agent": "Mozilla/5.0" } });
+  if (!r.ok) throw new Error("bad status");
+  const html = await r.text();
+  const m = html.match(/(\d+\.\d{2})/g);
+  if (!m) throw new Error("no numbers");
+  // pick a plausible ratio between 0 and 5
+  const num = m.map(x => Number(x)).find(n => isFinite(n) && n > 0 && n < 5);
+  if (!num) throw new Error("no plausible");
+  return { pcr: Number(num.toFixed(2)), asOf: null, source: url, stale: false };
+}
+
+export async function GET() {
+  const candidatesCsv = [
     "https://cdn.cboe.com/data/put_call_ratio/daily_total_pcr.csv",
     "https://cdn.cboe.com/api/global/us_indices/daily_prices/total_pcr.csv",
     "https://cdn.cboe.com/data/put_call_ratio/total_pc.csv",
   ];
 
-  for (const url of candidates) {
-    try {
-      const res = await fetch(url, { cache: "no-store", headers: { "User-Agent": "Mozilla/5.0" } });
-      if (!res.ok) continue;
-      const text = await res.text();
-      // Find the last non-empty line containing a numeric value
-      const lines = text.trim().split(/\r?\n/).filter(Boolean);
-      // Skip header if present; search from bottom up
-      for (let i = lines.length - 1; i >= 0; i--) {
-        const row = lines[i].split(/,|;|\t/).map(s => s.trim());
-        if (row.length < 2) continue;
-        const maybeDate = row[0];
-        const maybeVal = row[row.length - 1];
-        const num = Number(String(maybeVal).replace(/[^\d.\-]/g, ""));
-        if (isFinite(num) && num > 0 && num < 10) {
-          return { pcr: Number(num.toFixed(2)), asOf: maybeDate };
-        }
-      }
-    } catch {
-      // try next candidate
-    }
-  }
-  return { pcr: null };
-}
+  const candidatesHtml = [
+    // lightweight pages that sometimes show the latest total PCR
+    "https://www.cboe.com/us/options/market_statistics/daily/put_call_ratio/",
+  ];
 
-export async function GET() {
-  const data = await fetchFromCandidates();
-  return Response.json({ ...data, stale: data.pcr == null });
+  for (const u of candidatesCsv) {
+    try {
+      const out = await tryCsv(u);
+      return Response.json(out);
+    } catch {}
+  }
+
+  for (const u of candidatesHtml) {
+    try {
+      const out = await tryHtml(u);
+      return Response.json(out);
+    } catch {}
+  }
+
+  const miss: PcrResult = { pcr: null, asOf: null, stale: true };
+  return Response.json(miss);
 }

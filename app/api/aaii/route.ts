@@ -1,57 +1,92 @@
 export const dynamic = "force-dynamic";
 
 /**
- * AAII Sentiment (weekly). Tries a few public CSV mirrors that historically exist:
- * Expected columns: Date, Bullish, Neutral, Bearish (as %, with or without '%').
- * Returns the latest Bulls/Bears in % (numbers), plus the date.
+ * AAII weekly sentiment (Bulls/Bears %).
+ * Tries CSV first; if that fails, falls back to scraping the AAII page text.
  */
-async function fetchAAII(): Promise<{ bulls: number | null; bears: number | null; asOf?: string }> {
-  const candidates = [
-    "https://www.aaii.com/files/surveys/sentiment.csv",
-    "https://aaii.com/files/surveys/sentiment.csv",
-    // Some mirrors occasionally used by data sites (kept here as fallbacks)
-    "https://www.aaii.com/files/surveys/sentiment.csv?nocache=1",
-  ];
+type AaiiResult = { bulls: number | null; bears: number | null; asOf?: string | null; source?: string; stale?: boolean };
 
-  for (const url of candidates) {
-    try {
-      const r = await fetch(url, { cache: "no-store", headers: { "User-Agent": "Mozilla/5.0" } });
-      if (!r.ok) continue;
-      const csv = await r.text();
-      const lines = csv.trim().split(/\r?\n/).filter(Boolean);
-      if (lines.length < 2) continue;
+function toPct(s: string): number | null {
+  const n = Number(String(s).replace(/[^\d.\-]/g, ""));
+  return isFinite(n) ? Math.round(n * 10) / 10 : null;
+}
 
-      // Find last valid numeric row (skip any footers)
-      for (let i = lines.length - 1; i > 0; i--) {
-        const row = lines[i].split(/,|;|\t/).map(s => s.trim());
-        if (row.length < 3) continue;
-        const date = row[0];
-        // Columns positions vary historically; search for numbers in the row
-        const nums = row
-          .slice(1)
-          .map(s => Number(String(s).replace(/[^\d.\-]/g, "")))
-          .filter(n => isFinite(n));
-        // We want Bulls and Bears — usually in positions 0 and 2 after the date
-        if (nums.length >= 3) {
-          const bulls = nums[0];
-          const bears = nums[2];
-          if (isFinite(bulls) && isFinite(bears)) {
-            return {
-              bulls: Math.round(bulls * 10) / 10,
-              bears: Math.round(bears * 10) / 10,
-              asOf: date,
-            };
-          }
-        }
+function parseCsv(text: string): AaiiResult | null {
+  const lines = text.trim().split(/\r?\n/).filter(Boolean);
+  if (lines.length < 2) return null;
+  // Find last row with >=3 numeric columns
+  for (let i = lines.length - 1; i > 0; i--) {
+    const row = lines[i].split(/,|;|\t/).map(s => s.trim());
+    const date = row[0] || null;
+    const nums = row.slice(1).map(toPct).filter(n => n !== null) as number[];
+    // Usually: [Bulls, Neutral, Bears]
+    if (nums.length >= 3) {
+      const bulls = nums[0];
+      const bears = nums[2];
+      if (bulls != null && bears != null) {
+        return { bulls, bears, asOf: date, source: "csv", stale: false };
       }
-    } catch {
-      // Try next candidate
     }
   }
-  return { bulls: null, bears: null };
+  return null;
+}
+
+async function tryCsv(url: string): Promise<AaiiResult> {
+  const r = await fetch(url, { cache: "no-store", headers: { "User-Agent": "Mozilla/5.0" } });
+  if (!r.ok) throw new Error("bad status");
+  const text = await r.text();
+  const out = parseCsv(text);
+  if (!out) throw new Error("no values");
+  return out;
+}
+
+/** Fallback: scrape HTML and search for "Bullish xx.x%" and "Bearish xx.x%" */
+async function tryHtml(url: string): Promise<AaiiResult> {
+  const r = await fetch(url, { cache: "no-store", headers: { "User-Agent": "Mozilla/5.0" } });
+  if (!r.ok) throw new Error("bad status");
+  const html = await r.text();
+
+  const bullMatch = html.match(/Bullish[^0-9]{0,20}(\d{1,2}\.?\d?)%/i);
+  const bearMatch = html.match(/Bearish[^0-9]{0,20}(\d{1,2}\.?\d?)%/i);
+
+  const bulls = bullMatch ? toPct(bullMatch[1]) : null;
+  const bears = bearMatch ? toPct(bearMatch[1]) : null;
+
+  if (bulls == null || bears == null) throw new Error("not found");
+
+  // Try to extract a week-ending date if present
+  const dateMatch = html.match(/Week\s*Ending[^A-Za-z0-9]{0,10}([A-Za-z]{3,9}\s+\d{1,2},\s*\d{4})/i);
+  const asOf = dateMatch ? dateMatch[1] : null;
+
+  return { bulls, bears, asOf, source: "html", stale: false };
 }
 
 export async function GET() {
-  const data = await fetchAAII();
-  return Response.json({ ...data, stale: data.bulls == null || data.bears == null });
+  const csvCandidates = [
+    "https://www.aaii.com/files/surveys/sentiment.csv",
+    "https://aaii.com/files/surveys/sentiment.csv",
+    "https://www.aaii.com/files/surveys/sentiment.csv?nocache=1",
+  ];
+
+  for (const u of csvCandidates) {
+    try {
+      const out = await tryCsv(u);
+      return Response.json(out);
+    } catch {}
+  }
+
+  const htmlCandidates = [
+    "https://www.aaii.com/sentimentsurvey",
+    "https://www.aaii.com/sentimentsurvey/sent_results",
+  ];
+
+  for (const u of htmlCandidates) {
+    try {
+      const out = await tryHtml(u);
+      return Response.json(out);
+    } catch {}
+  }
+
+  const miss: AaiiResult = { bulls: null, bears: null, asOf: null, stale: true };
+  return Response.json(miss);
 }

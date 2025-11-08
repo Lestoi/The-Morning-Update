@@ -1,5 +1,6 @@
 // /app/page.tsx
 import React from "react";
+import { headers } from "next/headers";
 
 type MacroRow = {
   timeUK: string;
@@ -11,7 +12,6 @@ type MacroRow = {
   forecast: string;
   tier: "T1" | "T2" | "T3";
 };
-
 type MacroResp = { items: MacroRow[]; stale: boolean; source?: string; error?: string };
 
 type SentResp = {
@@ -24,14 +24,29 @@ type SentResp = {
   updated: string;
 };
 
-async function getMacro(): Promise<MacroResp> {
-  const res = await fetch(`${process.env.NEXT_PUBLIC_BASE_URL ?? ""}/api/macro`, { cache: "no-store" });
-  return res.json();
+function getBaseUrl() {
+  // 1) Prefer explicit env
+  const env = process.env.NEXT_PUBLIC_BASE_URL;
+  if (env) return env.replace(/\/$/, "");
+  // 2) Vercel provides VERCEL_URL (no protocol)
+  const vercel = process.env.VERCEL_URL;
+  if (vercel) return `https://${vercel}`;
+  // 3) Fallback: derive from request headers
+  const h = headers();
+  const host = h.get("x-forwarded-host") ?? h.get("host") ?? "localhost:3000";
+  const proto = h.get("x-forwarded-proto") ?? "http";
+  return `${proto}://${host}`;
 }
 
-async function getSentiment(): Promise<SentResp> {
-  const res = await fetch(`${process.env.NEXT_PUBLIC_BASE_URL ?? ""}/api/sentiment-snapshot`, { cache: "no-store" });
-  return res.json();
+async function safeGet<T>(path: string, fallback: T): Promise<T> {
+  try {
+    const base = getBaseUrl();
+    const res = await fetch(`${base}${path}`, { cache: "no-store" });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return (await res.json()) as T;
+  } catch {
+    return fallback;
+  }
 }
 
 function TierBadge({ tier }: { tier: "T1" | "T2" | "T3" }) {
@@ -43,7 +58,18 @@ function TierBadge({ tier }: { tier: "T1" | "T2" | "T3" }) {
 }
 
 export default async function Page() {
-  const [macro, sent] = await Promise.all([getMacro(), getSentiment()]);
+  const [macro, sent] = await Promise.all([
+    safeGet<MacroResp>("/api/macro", { items: [], stale: true }),
+    safeGet<SentResp>("/api/sentiment-snapshot", {
+      vix: null,
+      putCall: null,
+      aaii: null,
+      fearGreed: null,
+      stale: true,
+      sources: [],
+      updated: new Date().toISOString(),
+    }),
+  ]);
 
   return (
     <main className="mx-auto max-w-6xl p-6 space-y-8">
@@ -108,7 +134,7 @@ export default async function Page() {
       <section className="rounded-xl border border-neutral-800 bg-neutral-900/50">
         <div className="px-4 py-3">
           <h2 className="font-semibold">Sentiment</h2>
-          <p className="text-xs text-neutral-400">Live VIX; Put/Call live; AAII & Fear&amp;Greed wired with fallbacks.</p>
+          <p className="text-xs text-neutral-400">Live VIX & Put/Call; AAII and Fear &amp; Greed use fallbacks.</p>
         </div>
 
         <div className="grid grid-cols-1 gap-3 px-4 pb-4 md:grid-cols-2">
@@ -130,7 +156,7 @@ export default async function Page() {
           </div>
         </div>
         <div className="px-4 pb-3 text-xs text-neutral-500">
-          Sources: {sent.sources.join(", ")} • Updated {new Date(sent.updated).toLocaleTimeString("en-GB")}
+          Sources: {sent.sources.join(", ") || "—"} • Updated {new Date(sent.updated).toLocaleTimeString("en-GB")}
         </div>
       </section>
     </main>

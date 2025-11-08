@@ -2,8 +2,8 @@ export const dynamic = "force-dynamic";
 
 /**
  * EconDB macro calendar (public & free)
- * Example endpoint: https://www.econdb.com/api/calendar/?country=US&limit=20
- * Produces time, country, release, actual, previous, consensus, forecast, and tier.
+ * Endpoint: https://www.econdb.com/api/calendar/?country=US&limit=50
+ * Outputs rows for your table: timeUK, country, release, actual, previous, consensus, forecast, tier.
  */
 
 type Tier = 1 | 2 | 3;
@@ -17,6 +17,20 @@ type MacroRow = {
   previous?: string;
   consensus?: string;
   forecast?: string;
+};
+
+// EconDB result typing (best-effort; they may add fields)
+type EconDBItem = {
+  date: string;                    // ISO date/time string (UTC)
+  event?: string | null;
+  actual?: string | number | null;
+  previous?: string | number | null;
+  consensus?: string | number | null;
+  forecast?: string | number | null;
+};
+
+type EconDBResponse = {
+  results?: EconDBItem[];
 };
 
 function toUKTimeLabel(iso: string | number | Date): string {
@@ -35,18 +49,19 @@ function toUKTimeLabel(iso: string | number | Date): string {
 
 function classifyTier(name: string): Tier {
   const s = name.toLowerCase();
-  if (
-    /nonfarm|payroll|cpi|pce|fomc|fed|core inflation|core cpi|jobs report|unemployment/i.test(s)
-  )
-    return 1;
-  if (/pmi|ism|retail|gdp|ppi|housing|sentiment|confidence|durable/i.test(s))
-    return 2;
+  if (/nonfarm|payroll|cpi|pce|fomc|fed|core inflation|core cpi|jobs report|unemployment/i.test(s)) return 1;
+  if (/pmi|ism|retail|gdp|ppi|housing|sentiment|confidence|durable/i.test(s)) return 2;
   return 3;
+}
+
+function fmt(v: unknown): string | undefined {
+  if (v === null || v === undefined) return undefined;
+  const s = String(v).trim();
+  return s.length ? s : undefined;
 }
 
 export async function GET() {
   try {
-    // EconDB provides daily economic calendar JSON
     const url = "https://www.econdb.com/api/calendar/?country=US&limit=50";
     const res = await fetch(url, {
       headers: { "User-Agent": "Mozilla/5.0" },
@@ -54,21 +69,21 @@ export async function GET() {
     });
 
     if (!res.ok) {
-      throw new Error("Failed to fetch EconDB calendar");
+      throw new Error(`EconDB HTTP ${res.status}`);
     }
 
-    const data = await res.json();
-    const items = Array.isArray(data?.results) ? data.results : [];
+    const data: EconDBResponse = await res.json();
+    const items: EconDBItem[] = Array.isArray(data?.results) ? (data!.results as EconDBItem[]) : [];
 
     const mapped: MacroRow[] = items
-      .filter((x) => x?.date && x?.event)
-      .map((x) => {
-        const release = x.event?.trim() || "Unnamed release";
+      .filter((x: EconDBItem) => Boolean(x?.date && x?.event))
+      .map((x: EconDBItem) => {
+        const release = (x.event ?? "").toString().trim() || "Unnamed release";
         const timeUK = toUKTimeLabel(x.date);
-        const actual = x.actual || undefined;
-        const previous = x.previous || undefined;
-        const consensus = x.consensus || undefined;
-        const forecast = x.forecast || undefined;
+        const actual = fmt(x.actual);
+        const previous = fmt(x.previous);
+        const consensus = fmt(x.consensus);
+        const forecast = fmt(x.forecast);
         const tier = classifyTier(release);
 
         return {
@@ -82,14 +97,14 @@ export async function GET() {
           tier,
         };
       })
-      .sort((a, b) => (a.timeUK > b.timeUK ? 1 : -1));
+      .sort((a: MacroRow, b: MacroRow) => (a.timeUK > b.timeUK ? 1 : a.timeUK < b.timeUK ? -1 : 0));
 
     return Response.json({ items: mapped, stale: false, source: "EconDB" });
   } catch (err) {
     return Response.json({
       items: [],
       stale: true,
-      error: (err as Error).message,
+      error: (err as Error)?.message ?? "Unknown error",
       source: "EconDB",
     });
   }

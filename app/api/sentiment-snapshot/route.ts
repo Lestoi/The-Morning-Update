@@ -22,8 +22,7 @@ async function fetchVIX(): Promise<{ vix: number | null; asOf?: string | null }>
 
 async function fetchPCR(): Promise<{ pcr: number | null; asOf?: string | null }> {
   try {
-    const base =
-      process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : "http://localhost:3000";
+    const base = process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : "http://localhost:3000";
     const r = await fetch(`${base}/api/pcr`, { cache: "no-store" });
     const j = await r.json();
     return { pcr: j?.pcr ?? null, asOf: j?.asOf ?? null };
@@ -34,8 +33,7 @@ async function fetchPCR(): Promise<{ pcr: number | null; asOf?: string | null }>
 
 async function fetchAAII(): Promise<{ bulls: number | null; bears: number | null; asOf?: string | null }> {
   try {
-    const base =
-      process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : "http://localhost:3000";
+    const base = process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : "http://localhost:3000";
     const r = await fetch(`${base}/api/aaii`, { cache: "no-store" });
     const j = await r.json();
     return { bulls: j?.bulls ?? null, bears: j?.bears ?? null, asOf: j?.asOf ?? null };
@@ -46,9 +44,8 @@ async function fetchAAII(): Promise<{ bulls: number | null; bears: number | null
 
 export async function GET() {
   const [vixRes, pcrRes, aaiiRes] = await Promise.all([fetchVIX(), fetchPCR(), fetchAAII()]);
-
   return Response.json({
-    fearGreed: null, // optional future addition
+    fearGreed: null,
     pcrTotal: pcrRes.pcr,
     pcrAsOf: pcrRes.asOf ?? null,
     vix: vixRes.vix,
@@ -57,10 +54,6 @@ export async function GET() {
     aaiiBears: aaiiRes.bears,
     aaiiAsOf: aaiiRes.asOf ?? null,
     note: "VIX + PCR + AAII live with resilient fallbacks.",
-    stale:
-      vixRes.vix == null ||
-      pcrRes.pcr == null ||
-      aaiiRes.bulls == null ||
-      aaiiRes.bears == null,
+    stale: vixRes.vix == null || pcrRes.pcr == null || aaiiRes.bulls == null || aaiiRes.bears == null,
   });
 }

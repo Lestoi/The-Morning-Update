@@ -1,14 +1,57 @@
 export const dynamic = "force-dynamic";
 
+function toUKTime(iso: string) {
+  // FMP returns times in ET; many calendar rows include "date" only.
+  // We'll show just the UK time if available, else "—".
+  try {
+    const d = new Date(iso);
+    const uk = d.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: "Europe/London" });
+    return uk || "—";
+  } catch { return "—"; }
+}
+
 export async function GET() {
-  return Response.json({
-    items: [
-      // time UK, ISO2 country, release name, tier, actual/prev/cons/fcst (strings so we can show %/bps etc)
-      { timeUK: "13:30", country: "US", release: "Nonfarm Payrolls (OCT)", tier: 1, actual: "—", previous: "254k", consensus: "178k", forecast: "180k" },
-      { timeUK: "13:30", country: "US", release: "Unemployment Rate (OCT)", tier: 1, actual: "—", previous: "3.8%", consensus: "3.9%", forecast: "3.9%" },
-      { timeUK: "15:00", country: "US", release: "U. Michigan Sentiment (prelim)", tier: 2, actual: "—", previous: "68.4", consensus: "67.0", forecast: "67.0" },
-      { timeUK: "18:00", country: "US", release: "Baker Hughes Rig Count", tier: 3, actual: "—", previous: "624", consensus: "—",   forecast: "—" }
-    ],
-    stale: false
-  });
+  const key = process.env.FMP_API_KEY!;
+  const today = new Date();
+  const yyyy = today.getFullYear();
+  const mm = String(today.getMonth() + 1).padStart(2, "0");
+  const dd = String(today.getDate()).padStart(2, "0");
+  const from = `${yyyy}-${mm}-${dd}`;
+  const to = from;
+
+  const url = `https://financialmodelingprep.com/api/v3/economic_calendar?from=${from}&to=${to}&apikey=${key}`;
+
+  try {
+    const r = await fetch(url, { cache: "no-store" });
+    const raw = await r.json();
+
+    // Keep **US** releases; elevate a few well-known Tier 1 names
+    const tier1 = new Set([
+      "Nonfarm Payrolls", "Unemployment Rate", "CPI", "Core CPI", "PCE Price Index", "Retail Sales",
+      "ISM Manufacturing PMI", "ISM Services PMI", "FOMC Economic Projections", "Fed Interest Rate Decision"
+    ]);
+
+    const items = (raw ?? [])
+      .filter((x: any) => (x?.country || "").toUpperCase() === "UNITED STATES")
+      .map((x: any) => {
+        const title = String(x?.event || x?.name || "Release");
+        const t: 1|2|3 = tier1.has(title) ? 1 : /PMI|Michigan|PPI|GDP|JOLTS|Claims/i.test(title) ? 2 : 3;
+        return {
+          timeUK: x?.date ? toUKTime(x.date) : "—",
+          country: "US",
+          release: title,
+          tier: t,
+          actual: x?.actual?.toString() ?? "—",
+          previous: x?.previous?.toString() ?? "—",
+          consensus: x?.consensus?.toString() ?? "—",
+          forecast: x?.forecast?.toString() ?? "—"
+        };
+      })
+      // sort by UK time where available
+      .sort((a: any, b: any) => (a.timeUK > b.timeUK ? 1 : -1));
+
+    return Response.json({ items, stale: false });
+  } catch (e) {
+    return Response.json({ items: [], stale: true });
+  }
 }

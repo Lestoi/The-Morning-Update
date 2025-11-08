@@ -2,14 +2,16 @@
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs"; // ensure Node runtime on Vercel
 
-type FmpCal = {
-  date?: string;
-  country?: string;
-  event?: string;
-  actual?: string | number;
-  previous?: string | number;
-  estimate?: string | number;
-  impact?: string;
+type FmpV4Row = {
+  date?: string;          // ISO like "2025-11-08 13:30:00"
+  country?: string;       // e.g., "US"
+  event?: string;         // e.g., "Nonfarm Payrolls"
+  actual?: string | number | null;
+  previous?: string | number | null;
+  consensus?: string | number | null; // v4 frequently uses consensus
+  estimate?: string | number | null;  // sometimes present
+  impact?: string | null;             // "High"/"Medium"/"Low" or null
+  time?: string | null;               // sometimes separate time field
 };
 
 type Row = {
@@ -25,7 +27,7 @@ type Row = {
 
 const TIER1 = [
   "Nonfarm Payrolls", "Unemployment Rate", "CPI", "Core CPI",
-  "PCE Price Index", "Core PCE", "FOMC Rate Decision", "GDP", "Core PPI"
+  "PCE Price Index", "Core PCE", "FOMC Rate Decision", "GDP", "Core PPI",
 ];
 
 function toISODate(d = new Date()) {
@@ -44,7 +46,7 @@ function toUKTime(date: Date) {
   }).format(date);
 }
 
-function pickTier(e?: string, impact?: string): "T1" | "T2" | "T3" {
+function pickTier(e?: string, impact?: string | null): "T1" | "T2" | "T3" {
   const name = (e || "").toLowerCase();
   if (TIER1.some(x => name.includes(x.toLowerCase()))) return "T1";
   const imp = (impact || "").toLowerCase();
@@ -62,7 +64,9 @@ function asStr(v: any) {
 export async function GET() {
   const apiKey = process.env.FMP_API_KEY || "";
   const today = toISODate(new Date());
-  const url = `https://financialmodelingprep.com/api/v3/economic_calendar?from=${today}&to=${today}&apikey=${apiKey || "demo"}`;
+
+  // ✅ v4 endpoint (v3 is legacy / blocked)
+  const url = `https://financialmodelingprep.com/api/v4/economic-calendar?from=${today}&to=${today}&apikey=${apiKey || "demo"}`;
 
   try {
     const res = await fetch(url, {
@@ -73,36 +77,53 @@ export async function GET() {
     if (!res.ok) {
       const txt = await res.text().catch(() => "");
       return Response.json(
-        { items: [], stale: true, source: "FMP", error: `HTTP ${res.status} ${txt.slice(0,200)}` },
+        { items: [], stale: true, source: "FMP v4", error: `HTTP ${res.status} ${txt.slice(0, 300)}` },
         { status: 200 }
       );
     }
 
-    const json = (await res.json()) as FmpCal[];
+    const json = (await res.json()) as FmpV4Row[] | { error?: string };
+
+    // If FMP returns an object with error, surface it
+    if (!Array.isArray(json)) {
+      return Response.json(
+        { items: [], stale: true, source: "FMP v4", error: (json as any)?.error || "Unknown response" },
+        { status: 200 }
+      );
+    }
 
     const items: Row[] = (json || [])
       .filter(x => (x.country || "").toUpperCase() === "US")
       .map(x => {
-        // FMP sometimes omits time; we can keep only date and show UK time as "--"
-        const d = x.date ? new Date(`${x.date}T00:00:00Z`) : new Date();
+        // v4 often returns combined date (UTC). If missing time, UK will show "--:--".
+        let dt: Date | null = null;
+        if (x.date) {
+          // Some rows are "YYYY-MM-DD HH:mm:ss" -> treat as UTC
+          const iso = x.date.replace(" ", "T") + "Z";
+          const d = new Date(iso);
+          if (!isNaN(d.getTime())) dt = d;
+        }
+
         return {
-          timeUK: toUKTime(d),
+          timeUK: dt ? toUKTime(dt) : "—",
           country: x.country || "US",
           release: x.event || "Unnamed release",
           actual: asStr(x.actual),
           previous: asStr(x.previous),
-          consensus: asStr(x.estimate),
-          forecast: asStr(x.estimate),
+          consensus: asStr(x.consensus ?? x.estimate),
+          forecast: asStr(x.estimate ?? x.consensus),
           tier: pickTier(x.event, x.impact),
         };
       })
+      // dedupe
       .filter((r, i, arr) => arr.findIndex(k => k.release === r.release && k.timeUK === r.timeUK) === i)
+      // sort by time label
       .sort((a, b) => a.timeUK.localeCompare(b.timeUK));
 
-    return Response.json({ items, stale: false, source: "FMP" });
+    return Response.json({ items, stale: false, source: "FMP v4" });
   } catch (e) {
     return Response.json(
-      { items: [], stale: true, source: "FMP", error: (e as Error).message },
+      { items: [], stale: true, source: "FMP v4", error: (e as Error).message },
       { status: 200 }
     );
   }

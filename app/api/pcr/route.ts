@@ -2,9 +2,12 @@ export const dynamic = "force-dynamic";
 
 /**
  * Total market Put/Call Ratio (daily).
- * We try several public CSV/HTML endpoints (Cboe & mirrors). We parse the most
- * recent numeric and return { pcr, asOf }. If everything fails we return nulls.
+ * Strategy:
+ *  1) Try multiple Cboe CSV endpoints (preferred).
+ *  2) Fallback: scrape lightweight HTML pages that often display the latest total PCR.
+ * Returns { pcr, asOf, source, stale } and NEVER throws.
  */
+
 type PcrResult = { pcr: number | null; asOf?: string | null; source?: string; stale?: boolean };
 
 function parseLastNumericLine(text: string): { value: number | null; date?: string | null } {
@@ -15,8 +18,8 @@ function parseLastNumericLine(text: string): { value: number | null; date?: stri
     const raw = cols[cols.length - 1];
     const num = Number(String(raw).replace(/[^\d.\-]/g, ""));
     if (isFinite(num) && num > 0 && num < 10) {
-      const maybeDate = cols[0];
-      return { value: Number(num.toFixed(2)), date: maybeDate || null };
+      const maybeDate = cols[0] || null;
+      return { value: Number(num.toFixed(2)), date: maybeDate };
     }
   }
   return { value: null, date: null };
@@ -31,39 +34,42 @@ async function tryCsv(url: string): Promise<PcrResult> {
   return { pcr: value, asOf: date ?? null, source: url, stale: false };
 }
 
-/** Very liberal HTML fallback: scan page for a float like 0.83, 1.04 etc. */
+/** Very liberal HTML fallback: scan page for plausible floats like 0.83, 1.04, etc. */
 async function tryHtml(url: string): Promise<PcrResult> {
   const r = await fetch(url, { cache: "no-store", headers: { "User-Agent": "Mozilla/5.0" } });
   if (!r.ok) throw new Error("bad status");
   const html = await r.text();
-  const m = html.match(/(\d+\.\d{2})/g);
-  if (!m) throw new Error("no numbers");
-  // pick a plausible ratio between 0 and 5
-  const num = m.map(x => Number(x)).find(n => isFinite(n) && n > 0 && n < 5);
-  if (!num) throw new Error("no plausible");
+
+  // Heuristic: look near "Put/Call" phrases if present; otherwise scan whole page.
+  const target =
+    html.match(/put[^<]{0,40}call[^<]{0,40}ratio[\s\S]{0,200}/i)?.[0] ?? html;
+
+  const matches = target.match(/(\d+\.\d{2})/g) || [];
+  const num = matches.map(s => Number(s)).find(n => isFinite(n) && n > 0 && n < 5);
+  if (!num) throw new Error("no plausible number");
   return { pcr: Number(num.toFixed(2)), asOf: null, source: url, stale: false };
 }
 
 export async function GET() {
-  const candidatesCsv = [
+  const csvCandidates = [
     "https://cdn.cboe.com/data/put_call_ratio/daily_total_pcr.csv",
     "https://cdn.cboe.com/api/global/us_indices/daily_prices/total_pcr.csv",
     "https://cdn.cboe.com/data/put_call_ratio/total_pc.csv",
   ];
-
-  const candidatesHtml = [
-    // lightweight pages that sometimes show the latest total PCR
+  const htmlCandidates = [
+    // Cboe stats page (often contains the "Total Put/Call Ratio")
     "https://www.cboe.com/us/options/market_statistics/daily/put_call_ratio/",
+    // MarketWatch market data page (occasionally lists total PCR)
+    "https://www.marketwatch.com/market-data",
   ];
 
-  for (const u of candidatesCsv) {
+  for (const u of csvCandidates) {
     try {
       const out = await tryCsv(u);
       return Response.json(out);
     } catch {}
   }
-
-  for (const u of candidatesHtml) {
+  for (const u of htmlCandidates) {
     try {
       const out = await tryHtml(u);
       return Response.json(out);

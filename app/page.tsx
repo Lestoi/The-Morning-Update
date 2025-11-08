@@ -52,7 +52,19 @@ type OptionsBrief = {
 };
 
 type NewsItem = { title: string; source: string; summary?: string };
-type YDayEarning = { symbol: string; name: string; epsSurprisePct: number };
+
+/** NEW: yesterday earnings API output */
+type YDayEarning = {
+  symbol: string;
+  name: string;
+  time: "BMO" | "AMC" | "TBD";
+  epsActual: number | null;
+  epsEstimate: number | null;
+  epsSurprise: number | null;
+  surprisePct: number | null;
+  beat: boolean | null;
+  marketCap: number | null;
+};
 
 /* =========================
    Small helpers
@@ -88,7 +100,6 @@ function optionsExplanations(o?: OptionsBrief): string[] {
   if (!o) return ["No options data available."];
 
   const bullets: string[] = [];
-
   if (o.pcrTotal != null) {
     bullets.push(
       `Total market put/call ratio = ${o.pcrTotal.toFixed(2)}. ` +
@@ -97,7 +108,6 @@ function optionsExplanations(o?: OptionsBrief): string[] {
           : "Below 1 → more calls than puts (risk-on). Positive data can extend trends; negative surprises can unwind quickly.")
     );
   }
-
   if (o.es?.oiCalls != null && o.es?.oiPuts != null) {
     bullets.push(
       `ES (S&P) OI — Calls ${o.es.oiCalls.toLocaleString()} vs Puts ${o.es.oiPuts.toLocaleString()}. ` +
@@ -106,7 +116,6 @@ function optionsExplanations(o?: OptionsBrief): string[] {
           : "Calls ≥ puts: upside exposure heavier; weak data can produce faster selloffs as longs reduce.")
     );
   }
-
   if (o.nq?.oiCalls != null && o.nq?.oiPuts != null) {
     bullets.push(
       `NQ (Nasdaq) OI — Calls ${o.nq.oiCalls.toLocaleString()} vs Puts ${o.nq.oiPuts.toLocaleString()}. ` +
@@ -115,11 +124,9 @@ function optionsExplanations(o?: OptionsBrief): string[] {
           : "Tech upside is more crowded; keep an eye on yields/USD — they gate follow-through.")
     );
   }
-
   bullets.push(
     "Rule of thumb: bigger put tilt → faster first move but more mean-revert risk; lighter tilt → cleaner trends if the macro surprise is decisive."
   );
-
   return bullets;
 }
 
@@ -129,25 +136,20 @@ function parseNum(s?: string) {
   const n = Number(String(s).replace(/[,%]/g, ""));
   return isFinite(n) ? n : null;
 }
-
 function lowerIsBetter(name: string) {
   return /unemployment|jobless|cpi|core cpi|pce|core pce|ppi|inflation|deflator|claims|deficit/i.test(name);
 }
-
 function higherIsBetter(name: string) {
   return /payrolls|nonfarm|nfp|retail sales|ism|pmi|housing starts|new home|existing home|durable|gdp|jolts|confidence|sentiment|rig count|industrial/i.test(
     name
   );
 }
-
 function evalBeat(row: { release: string; actual?: string; consensus?: string }) {
   const a = parseNum(row.actual);
   const c = parseNum(row.consensus);
   if (a == null || c == null) return { color: "", deltaText: "" };
-
   const delta = a - c;
   const isGood = higherIsBetter(row.release) ? delta >= 0 : lowerIsBetter(row.release) ? delta <= 0 : delta >= 0;
-
   const color = isGood ? "text-emerald-400" : "text-rose-400";
   const deltaText = `${delta >= 0 ? "+" : ""}${(Math.round(delta * 100) / 100).toString()}`;
   return { color, deltaText };
@@ -207,6 +209,9 @@ export default function Page() {
       return s;
     }
   };
+
+  const fmtNum = (n: number | null, digits = 2) =>
+    n == null || !isFinite(n) ? "—" : (Math.round(n * Math.pow(10, digits)) / Math.pow(10, digits)).toString();
 
   return (
     <div className="min-h-screen bg-neutral-950 text-neutral-100 px-6 py-6">
@@ -302,10 +307,7 @@ export default function Page() {
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div>Fear &amp; Greed</div>
                   <div className="flex items-center gap-2">
-                    <Chip
-                      text={`${sentiment.fearGreed ?? "—"}`}
-                      className={getFgColor(sentiment.fearGreed)}
-                    />
+                    <Chip text={`${sentiment.fearGreed ?? "—"}`} className={getFgColor(sentiment.fearGreed)} />
                     <Chip text={`${sentiment.fearGreedLabel ?? ""}`} className="bg-neutral-800 text-neutral-100" />
                     <span className="text-neutral-400">(0=fear, 100=greed)</span>
                   </div>
@@ -389,9 +391,72 @@ export default function Page() {
           </CardContent>
         </Card>
 
-        {/* Earnings / Stories (unchanged placeholders) */}
+        {/* Yesterday's notable earnings (US) */}
+        <Card>
+          <CardContent>
+            <h2 className="mb-2 text-lg font-semibold">Yesterday’s notable earnings (US)</h2>
+            <p className="text-xs text-neutral-400 -mt-1 mb-3">
+              Top results by market cap; EPS actual vs estimate with beat/miss.
+            </p>
+
+            <div className="overflow-auto rounded-xl border border-neutral-800">
+              <table className="w-full text-[15px]">
+                <thead className="bg-neutral-900/80 sticky top-0 z-10">
+                  <tr className="[&>th]:px-4 [&>th]:py-3 text-left text-neutral-300">
+                    <th className="w-[80px]">Time</th>
+                    <th className="w-[120px]">Symbol</th>
+                    <th className="min-w-[260px]">Company</th>
+                    <th className="w-[160px] text-right">EPS (Actual / Est.)</th>
+                    <th className="w-[140px] text-right">Surprise</th>
+                    <th className="w-[90px] text-center">Result</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-neutral-800">
+                  {yday.length === 0 ? (
+                    <tr>
+                      <td colSpan={6} className="px-4 py-4 text-neutral-400 text-sm">
+                        No US earnings found for yesterday (or source returned none).
+                      </td>
+                    </tr>
+                  ) : (
+                    yday.map((row, i) => {
+                      const resultChip =
+                        row.beat == null ? (
+                          <Chip text="N/A" className="bg-neutral-700 text-white" />
+                        ) : row.beat ? (
+                          <Chip text="Beat" className="bg-emerald-700 text-white" />
+                        ) : (
+                          <Chip text="Miss" className="bg-rose-700 text-white" />
+                        );
+
+                      const surpriseStr =
+                        row.epsSurprise == null && row.surprisePct == null
+                          ? "—"
+                          : `${fmtNum(row.epsSurprise)} (${fmtNum(row.surprisePct)}%)`;
+
+                      return (
+                        <tr key={i} className="hover:bg-neutral-900/50">
+                          <td className="px-4 py-3 text-neutral-300">{row.time}</td>
+                          <td className="px-4 py-3 font-mono">{row.symbol}</td>
+                          <td className="px-4 py-3">{row.name}</td>
+                          <td className="px-4 py-3 text-right text-neutral-200">
+                            {fmtNum(row.epsActual)} /{" "}
+                            <span className="text-neutral-400">{fmtNum(row.epsEstimate)}</span>
+                          </td>
+                          <td className="px-4 py-3 text-right">{surpriseStr}</td>
+                          <td className="px-4 py-3 text-center">{resultChip}</td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </CardContent>
+        </Card>
+
         <p className="text-[11px] text-neutral-500">
-          Sentiment now includes live Fear &amp; Greed with labels and timestamps.
+          Earnings data via FMP (free). Sentiment includes live Fear &amp; Greed, PCR, VIX, and AAII.
         </p>
       </div>
     </div>

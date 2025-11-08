@@ -1,0 +1,16 @@
+<!-- /public/favicon.svg -->
+<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <rect width="512" height="512" rx="96" fill="#0a0a0a"/>
+  <!-- mug body -->
+  <path d="M128 184c0-12 10-22 22-22h152c12 0 22 10 22 22v144c0 24-20 44-44 44H172c-24 0-44-20-44-44V184z"
+        fill="none" stroke="#e5e5e5" stroke-width="20" stroke-linejoin="round"/>
+  <!-- saucer -->
+  <path d="M120 352c0 22 60 40 136 40s136-18 136-40" fill="none" stroke="#6b7280" stroke-width="16" stroke-linecap="round"/>
+  <!-- handle -->
+  <path d="M324 214h26c30 0 54 24 54 54s-24 54-54 54h-26"
+        fill="none" stroke="#e5e5e5" stroke-width="20" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- steam -->
+  <path d="M196 144c-10-10-10-26 0-36s10-26 0-36" fill="none" stroke="#cbd5e1" stroke-width="12" stroke-linecap="round" opacity=".9"/>
+  <path d="M246 144c-10-10-10-26 0-36s10-26 0-36" fill="none" stroke="#cbd5e1" stroke-width="12" stroke-linecap="round" opacity=".8"/>
+  <path d="M296 144c-10-10-10-26 0-36s10-26 0-36" fill="none" stroke="#cbd5e1" stroke-width="12" stroke-linecap="round" opacity=".7"/>
+</svg>

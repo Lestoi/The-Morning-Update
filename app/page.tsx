@@ -2,6 +2,8 @@
 import React from "react";
 import { headers } from "next/headers";
 
+export const dynamic = "force-dynamic"; // ensure server renders at request-time
+
 type MacroRow = {
   timeUK: string;
   country: string;
@@ -25,27 +27,24 @@ type SentResp = {
 };
 
 function getBaseUrl() {
-  // 1) Prefer explicit env
   const env = process.env.NEXT_PUBLIC_BASE_URL;
   if (env) return env.replace(/\/$/, "");
-  // 2) Vercel provides VERCEL_URL (no protocol)
   const vercel = process.env.VERCEL_URL;
   if (vercel) return `https://${vercel}`;
-  // 3) Fallback: derive from request headers
   const h = headers();
   const host = h.get("x-forwarded-host") ?? h.get("host") ?? "localhost:3000";
   const proto = h.get("x-forwarded-proto") ?? "http";
   return `${proto}://${host}`;
 }
 
-async function safeGet<T>(path: string, fallback: T): Promise<T> {
+async function safeGet<T extends { [k: string]: any }>(path: string, fallback: T): Promise<T> {
   try {
     const base = getBaseUrl();
     const res = await fetch(`${base}${path}`, { cache: "no-store" });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return (await res.json()) as T;
-  } catch {
-    return fallback;
+  } catch (e: any) {
+    return { ...fallback, stale: true, error: e?.message ?? "fetch failed" } as T;
   }
 }
 
@@ -61,13 +60,7 @@ export default async function Page() {
   const [macro, sent] = await Promise.all([
     safeGet<MacroResp>("/api/macro", { items: [], stale: true }),
     safeGet<SentResp>("/api/sentiment-snapshot", {
-      vix: null,
-      putCall: null,
-      aaii: null,
-      fearGreed: null,
-      stale: true,
-      sources: [],
-      updated: new Date().toISOString(),
+      vix: null, putCall: null, aaii: null, fearGreed: null, stale: true, sources: [], updated: new Date().toISOString(),
     }),
   ]);
 
@@ -126,7 +119,9 @@ export default async function Page() {
           </table>
         </div>
         {macro.stale && (
-          <p className="px-4 pb-3 text-xs text-amber-400">Using cached/fallback data.</p>
+          <p className="px-4 pb-3 text-xs text-amber-400">
+            Using cached/fallback data{macro.error ? ` — ${macro.error}` : ""}{macro.source ? ` (source: ${macro.source})` : ""}.
+          </p>
         )}
       </section>
 

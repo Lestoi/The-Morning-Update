@@ -20,40 +20,63 @@ async function fetchVIX(): Promise<{ vix: number | null; asOf?: string | null }>
   }
 }
 
-async function fetchPCR(): Promise<{ pcr: number | null; asOf?: string | null }> {
+async function fetchInternal(path: string) {
+  const base = process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : "http://localhost:3000";
+  const r = await fetch(`${base}${path}`, { cache: "no-store" });
+  return r.json();
+}
+
+async function fetchPCR() {
   try {
-    const base = process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : "http://localhost:3000";
-    const r = await fetch(`${base}/api/pcr`, { cache: "no-store" });
-    const j = await r.json();
+    const j = await fetchInternal("/api/pcr");
     return { pcr: j?.pcr ?? null, asOf: j?.asOf ?? null };
   } catch {
     return { pcr: null, asOf: null };
   }
 }
 
-async function fetchAAII(): Promise<{ bulls: number | null; bears: number | null; asOf?: string | null }> {
+async function fetchAAII() {
   try {
-    const base = process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : "http://localhost:3000";
-    const r = await fetch(`${base}/api/aaii`, { cache: "no-store" });
-    const j = await r.json();
+    const j = await fetchInternal("/api/aaii");
     return { bulls: j?.bulls ?? null, bears: j?.bears ?? null, asOf: j?.asOf ?? null };
   } catch {
     return { bulls: null, bears: null, asOf: null };
   }
 }
 
+async function fetchFNG() {
+  try {
+    const j = await fetchInternal("/api/feargreed");
+    return { score: j?.score ?? null, label: j?.label ?? null, asOf: j?.asOf ?? null };
+  } catch {
+    return { score: null, label: null, asOf: null };
+  }
+}
+
 export async function GET() {
-  const [vixRes, pcrRes, aaiiRes] = await Promise.all([fetchVIX(), fetchPCR(), fetchAAII()]);
+  const [vixRes, pcrRes, aaiiRes, fngRes] = await Promise.all([fetchVIX(), fetchPCR(), fetchAAII(), fetchFNG()]);
+
   return Response.json({
-    fearGreed: null,
+    fearGreed: fngRes.score,
+    fearGreedLabel: fngRes.label,
+    fearGreedAsOf: fngRes.asOf ?? null,
+
     pcrTotal: pcrRes.pcr,
     pcrAsOf: pcrRes.asOf ?? null,
+
     vix: vixRes.vix,
     vixAsOf: vixRes.asOf ?? null,
+
     aaiiBulls: aaiiRes.bulls,
     aaiiBears: aaiiRes.bears,
     aaiiAsOf: aaiiRes.asOf ?? null,
-    note: "VIX + PCR + AAII live with resilient fallbacks.",
-    stale: vixRes.vix == null || pcrRes.pcr == null || aaiiRes.bulls == null || aaiiRes.bears == null,
+
+    note: "VIX + PCR + AAII + Fear & Greed live.",
+    stale:
+      vixRes.vix == null ||
+      pcrRes.pcr == null ||
+      aaiiRes.bulls == null ||
+      aaiiRes.bears == null ||
+      fngRes.score == null,
   });
 }

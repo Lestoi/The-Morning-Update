@@ -28,13 +28,19 @@ type EarningItem = {
 
 type Sentiment = {
   fearGreed?: number | null;
+  fearGreedLabel?: string | null;
+  fearGreedAsOf?: string | null;
+
   pcrTotal?: number | null;
   pcrAsOf?: string | null;
+
   vix?: number | null;
   vixAsOf?: string | null;
+
   aaiiBulls?: number | null;
   aaiiBears?: number | null;
   aaiiAsOf?: string | null;
+
   note?: string;
 };
 
@@ -68,7 +74,16 @@ const Chip = ({ text, className = "" }: { text: string; className?: string }) =>
   <span className={`inline-flex items-center rounded-md px-2 py-0.5 text-sm font-medium ${className}`}>{text}</span>
 );
 
-/* -------- Options explanations (plain-English) -------- */
+function getFgColor(n?: number | null) {
+  if (n == null) return "bg-neutral-700 text-white";
+  if (n <= 25) return "bg-rose-700 text-white";
+  if (n <= 44) return "bg-amber-600 text-black";
+  if (n <= 55) return "bg-neutral-700 text-white";
+  if (n <= 74) return "bg-emerald-700 text-white";
+  return "bg-green-700 text-white";
+}
+
+/* -------- Options explanations -------- */
 function optionsExplanations(o?: OptionsBrief): string[] {
   if (!o) return ["No options data available."];
 
@@ -183,7 +198,6 @@ export default function Page() {
   const formatAsOf = (s?: string | null) => {
     if (!s) return null;
     try {
-      // handle CSV date (YYYY-MM-DD) or RFC/UTC strings
       const d = new Date(s);
       if (!isNaN(d.getTime())) {
         return d.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
@@ -249,8 +263,6 @@ export default function Page() {
                         {flag(row.country)} <span className="ml-1 text-neutral-300">{row.country}</span>
                       </td>
                       <td className="px-4 py-3">{row.release}</td>
-
-                      {/* Actual with color & delta */}
                       <td className="px-4 py-3 text-right">
                         {(() => {
                           const { color, deltaText } = evalBeat(row);
@@ -264,7 +276,6 @@ export default function Page() {
                           );
                         })()}
                       </td>
-
                       <td className="px-4 py-3 text-right text-neutral-300">{row.previous ?? "—"}</td>
                       <td className="px-4 py-3 text-right text-neutral-300">{row.consensus ?? "—"}</td>
                       <td className="px-4 py-3 text-right text-neutral-300">{row.forecast ?? "—"}</td>
@@ -286,15 +297,22 @@ export default function Page() {
             <p className="text-xs text-neutral-400 -mt-1 mb-3">Live VIX; PCR &amp; AAII wired with resilient fallbacks.</p>
 
             <div className="space-y-3 text-sm">
-              {/* Fear & Greed (placeholder) */}
+              {/* Fear & Greed */}
               <div className="rounded-xl border border-neutral-800 bg-neutral-900/60 px-4 py-3">
-                <div className="flex items-center justify-between">
+                <div className="flex flex-wrap items-center justify-between gap-2">
                   <div>Fear &amp; Greed</div>
                   <div className="flex items-center gap-2">
-                    <Chip text={`${sentiment.fearGreed ?? "—"}`} className="bg-amber-600 text-white" />
+                    <Chip
+                      text={`${sentiment.fearGreed ?? "—"}`}
+                      className={getFgColor(sentiment.fearGreed)}
+                    />
+                    <Chip text={`${sentiment.fearGreedLabel ?? ""}`} className="bg-neutral-800 text-neutral-100" />
                     <span className="text-neutral-400">(0=fear, 100=greed)</span>
                   </div>
                 </div>
+                {sentiment.fearGreedAsOf && (
+                  <div className="mt-1 text-[11px] text-neutral-500">As of {formatAsOf(sentiment.fearGreedAsOf)}</div>
+                )}
               </div>
 
               {/* PCR */}
@@ -371,16 +389,9 @@ export default function Page() {
           </CardContent>
         </Card>
 
-        {/* Earnings (today) + Yesterday’s notable earnings */}
-        <div className="grid gap-6 lg:grid-cols-2">
-          {/* ...unchanged from prior version (keep your existing earnings blocks) ... */}
-        </div>
-
-        {/* Stories */}
-        {/* ...unchanged from prior version ... */}
-
+        {/* Earnings / Stories (unchanged placeholders) */}
         <p className="text-[11px] text-neutral-500">
-          Sentiment now shows “As of” stamps; PCR &amp; AAII use resilient fallbacks.
+          Sentiment now includes live Fear &amp; Greed with labels and timestamps.
         </p>
       </div>
     </div>

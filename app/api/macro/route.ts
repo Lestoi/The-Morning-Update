@@ -1,57 +1,96 @@
 export const dynamic = "force-dynamic";
 
-function toUKTime(iso: string) {
-  // FMP returns times in ET; many calendar rows include "date" only.
-  // We'll show just the UK time if available, else "—".
+/**
+ * EconDB macro calendar (public & free)
+ * Example endpoint: https://www.econdb.com/api/calendar/?country=US&limit=20
+ * Produces time, country, release, actual, previous, consensus, forecast, and tier.
+ */
+
+type Tier = 1 | 2 | 3;
+
+type MacroRow = {
+  timeUK: string;
+  country: string;
+  release: string;
+  tier: Tier;
+  actual?: string;
+  previous?: string;
+  consensus?: string;
+  forecast?: string;
+};
+
+function toUKTimeLabel(iso: string | number | Date): string {
   try {
     const d = new Date(iso);
-    const uk = d.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: "Europe/London" });
-    return uk || "—";
-  } catch { return "—"; }
+    return new Intl.DateTimeFormat("en-GB", {
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+      timeZone: "Europe/London",
+    }).format(d);
+  } catch {
+    return "—";
+  }
+}
+
+function classifyTier(name: string): Tier {
+  const s = name.toLowerCase();
+  if (
+    /nonfarm|payroll|cpi|pce|fomc|fed|core inflation|core cpi|jobs report|unemployment/i.test(s)
+  )
+    return 1;
+  if (/pmi|ism|retail|gdp|ppi|housing|sentiment|confidence|durable/i.test(s))
+    return 2;
+  return 3;
 }
 
 export async function GET() {
-  const key = process.env.FMP_API_KEY!;
-  const today = new Date();
-  const yyyy = today.getFullYear();
-  const mm = String(today.getMonth() + 1).padStart(2, "0");
-  const dd = String(today.getDate()).padStart(2, "0");
-  const from = `${yyyy}-${mm}-${dd}`;
-  const to = from;
-
-  const url = `https://financialmodelingprep.com/api/v3/economic_calendar?from=${from}&to=${to}&apikey=${key}`;
-
   try {
-    const r = await fetch(url, { cache: "no-store" });
-    const raw = await r.json();
+    // EconDB provides daily economic calendar JSON
+    const url = "https://www.econdb.com/api/calendar/?country=US&limit=50";
+    const res = await fetch(url, {
+      headers: { "User-Agent": "Mozilla/5.0" },
+      cache: "no-store",
+    });
 
-    // Keep **US** releases; elevate a few well-known Tier 1 names
-    const tier1 = new Set([
-      "Nonfarm Payrolls", "Unemployment Rate", "CPI", "Core CPI", "PCE Price Index", "Retail Sales",
-      "ISM Manufacturing PMI", "ISM Services PMI", "FOMC Economic Projections", "Fed Interest Rate Decision"
-    ]);
+    if (!res.ok) {
+      throw new Error("Failed to fetch EconDB calendar");
+    }
 
-    const items = (raw ?? [])
-      .filter((x: any) => (x?.country || "").toUpperCase() === "UNITED STATES")
-      .map((x: any) => {
-        const title = String(x?.event || x?.name || "Release");
-        const t: 1|2|3 = tier1.has(title) ? 1 : /PMI|Michigan|PPI|GDP|JOLTS|Claims/i.test(title) ? 2 : 3;
+    const data = await res.json();
+    const items = Array.isArray(data?.results) ? data.results : [];
+
+    const mapped: MacroRow[] = items
+      .filter((x) => x?.date && x?.event)
+      .map((x) => {
+        const release = x.event?.trim() || "Unnamed release";
+        const timeUK = toUKTimeLabel(x.date);
+        const actual = x.actual || undefined;
+        const previous = x.previous || undefined;
+        const consensus = x.consensus || undefined;
+        const forecast = x.forecast || undefined;
+        const tier = classifyTier(release);
+
         return {
-          timeUK: x?.date ? toUKTime(x.date) : "—",
-          country: "US",
-          release: title,
-          tier: t,
-          actual: x?.actual?.toString() ?? "—",
-          previous: x?.previous?.toString() ?? "—",
-          consensus: x?.consensus?.toString() ?? "—",
-          forecast: x?.forecast?.toString() ?? "—"
+          timeUK,
+          country: "United States",
+          release,
+          actual,
+          previous,
+          consensus,
+          forecast,
+          tier,
         };
       })
-      // sort by UK time where available
-      .sort((a: any, b: any) => (a.timeUK > b.timeUK ? 1 : -1));
+      .sort((a, b) => (a.timeUK > b.timeUK ? 1 : -1));
 
-    return Response.json({ items, stale: false });
-  } catch (e) {
-    return Response.json({ items: [], stale: true });
+    return Response.json({ items: mapped, stale: false, source: "EconDB" });
+  } catch (err) {
+    return Response.json({
+      items: [],
+      stale: true,
+      error: (err as Error).message,
+      source: "EconDB",
+    });
   }
 }

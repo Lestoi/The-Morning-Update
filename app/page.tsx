@@ -1,3 +1,29 @@
+function parseNum(s?: string) {
+  if (s == null) return null;
+  const n = Number(String(s).replace(/[,%]/g, ""));
+  return isFinite(n) ? n : null;
+}
+
+function lowerIsBetter(name: string) {
+  return /unemployment|jobless|cpi|core cpi|pce|core pce|ppi|inflation|deflator|claims|deficit/i.test(name);
+}
+
+function higherIsBetter(name: string) {
+  return /payrolls|nonfarm|nfp|retail sales|ism|pmi|housing starts|new home|existing home|durable|gdp|jolts|confidence|sentiment|rig count|industrial/i.test(name);
+}
+
+function evalBeat(row: { release: string; actual?: string; consensus?: string }) {
+  const a = parseNum(row.actual);
+  const c = parseNum(row.consensus);
+  if (a == null || c == null) return { color: "", deltaText: "" };
+  const delta = a - c;
+  const isGood = higherIsBetter(row.release) ? delta >= 0
+                : lowerIsBetter(row.release) ? delta <= 0
+                : delta >= 0; // default
+  const color = isGood ? "text-emerald-400" : "text-rose-400";
+  const deltaText = `${delta >= 0 ? "+" : ""}${(Math.round(delta * 100) / 100).toString()}`;
+  return { color, deltaText };
+}
 "use client";
 import React, { useEffect, useMemo, useState } from "react";
 import { Card, CardContent, Badge, Button } from "@/components/ui";

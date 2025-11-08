@@ -1,4 +1,4 @@
-import "./globals.css";
+import "../styles/globals.css";
 import { Inter } from "next/font/google";
 import type { Metadata } from "next";
 
@@ -9,7 +9,7 @@ export const metadata: Metadata = {
   description: "Daily market summary and sentiment dashboard",
   icons: {
     icon: [
-      { url: "/favicon.svg", type: "image/svg+xml" }, // ☕ Coffee mug favicon
+      { url: "/favicon.svg", type: "image/svg+xml" }, // ☕ coffee mug favicon
       { url: "/icon-192.png", sizes: "192x192", type: "image/png" },
       { url: "/icon-512.png", sizes: "512x512", type: "image/png" },
     ],

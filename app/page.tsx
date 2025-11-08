@@ -51,9 +51,8 @@ type OptionsBrief = {
   comment?: string;
 };
 
-type NewsItem = { title: string; source: string; summary?: string };
+type NewsItem = { title: string; source: string; summary?: string; published?: string };
 
-/** NEW: yesterday earnings API output */
 type YDayEarning = {
   symbol: string;
   name: string;
@@ -202,7 +201,13 @@ export default function Page() {
     try {
       const d = new Date(s);
       if (!isNaN(d.getTime())) {
-        return d.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
+        return d.toLocaleString("en-GB", {
+          weekday: "short",
+          day: "2-digit",
+          month: "short",
+          hour: "2-digit",
+          minute: "2-digit",
+        });
       }
       return s;
     } catch {
@@ -455,8 +460,34 @@ export default function Page() {
           </CardContent>
         </Card>
 
+        {/* Top market stories */}
+        <Card>
+          <CardContent>
+            <h2 className="mb-2 text-lg font-semibold">Top market stories</h2>
+            <p className="text-xs text-neutral-400 -mt-1 mb-3">
+              Short summaries of the key themes US investors are watching today.
+            </p>
+
+            {news.length === 0 ? (
+              <p className="text-sm text-neutral-400">No stories available right now.</p>
+            ) : (
+              <ol className="list-decimal pl-5 space-y-4">
+                {news.map((item, i) => (
+                  <li key={i}>
+                    <div className="font-medium">{item.title}</div>
+                    {item.summary && <div className="text-sm text-neutral-200 mt-1">{item.summary}</div>}
+                    <div className="text-[11px] text-neutral-500 mt-1">
+                      {item.source} · {formatAsOf(item.published)}
+                    </div>
+                  </li>
+                ))}
+              </ol>
+            )}
+          </CardContent>
+        </Card>
+
         <p className="text-[11px] text-neutral-500">
-          Earnings data via FMP (free). Sentiment includes live Fear &amp; Greed, PCR, VIX, and AAII.
+          Earnings & news via FMP (free). Sentiment includes live Fear &amp; Greed, PCR, VIX, and AAII.
         </p>
       </div>
     </div>

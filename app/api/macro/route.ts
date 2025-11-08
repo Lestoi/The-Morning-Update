@@ -1,17 +1,15 @@
 // /app/api/macro/route.ts
 export const dynamic = "force-dynamic";
+export const runtime = "nodejs"; // ensure Node runtime on Vercel
 
 type FmpCal = {
-  date?: string;           // "2025-11-08"
-  country?: string;        // "US"
-  event?: string;          // "Nonfarm Payrolls"
+  date?: string;
+  country?: string;
+  event?: string;
   actual?: string | number;
   previous?: string | number;
-  change?: string | number;
-  changePercentage?: string | number;
   estimate?: string | number;
-  impact?: string;         // sometimes: "High" | "Medium" | "Low"
-  time?: string;           // sometimes available
+  impact?: string;
 };
 
 type Row = {
@@ -37,70 +35,75 @@ function toISODate(d = new Date()) {
   return `${y}-${m}-${day}`;
 }
 
+function toUKTime(date: Date) {
+  return new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Europe/London",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: true,
+  }).format(date);
+}
+
+function pickTier(e?: string, impact?: string): "T1" | "T2" | "T3" {
+  const name = (e || "").toLowerCase();
+  if (TIER1.some(x => name.includes(x.toLowerCase()))) return "T1";
+  const imp = (impact || "").toLowerCase();
+  if (imp.includes("high")) return "T1";
+  if (imp.includes("medium")) return "T2";
+  return "T3";
+}
+
 function asStr(v: any) {
   if (v === null || v === undefined) return "—";
   const s = String(v).trim();
   return s === "" ? "—" : s;
 }
 
-function pickTier(item: FmpCal): "T1" | "T2" | "T3" {
-  const name = (item.event || "").toLowerCase();
-  if (TIER1.some(x => name.includes(x.toLowerCase()))) return "T1";
-  const impact = (item.impact || "").toLowerCase();
-  if (impact.includes("high")) return "T1";
-  if (impact.includes("medium")) return "T2";
-  return "T3";
-}
-
-function toUKTime(d: Date) {
-  // UK time regardless of server location
-  const fmt = new Intl.DateTimeFormat("en-GB", {
-    timeZone: "Europe/London",
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: true,
-  });
-  return fmt.format(d);
-}
-
 export async function GET() {
-  const apiKey = process.env.FMP_API_KEY || "demo";
-  // FMP economic calendar supports date range
+  const apiKey = process.env.FMP_API_KEY || "";
   const today = toISODate(new Date());
-  const url = `https://financialmodelingprep.com/api/v3/economic_calendar?from=${today}&to=${today}&apikey=${apiKey}`;
+  const url = `https://financialmodelingprep.com/api/v3/economic_calendar?from=${today}&to=${today}&apikey=${apiKey || "demo"}`;
 
   try {
-    const res = await fetch(url, { cache: "no-store", headers: { "User-Agent": "Mozilla/5.0" } });
-    if (!res.ok) throw new Error(`FMP economic_calendar HTTP ${res.status}`);
-    const data = (await res.json()) as FmpCal[];
+    const res = await fetch(url, {
+      cache: "no-store",
+      headers: { "User-Agent": "Mozilla/5.0" },
+    });
 
-    const items: Row[] = data
+    if (!res.ok) {
+      const txt = await res.text().catch(() => "");
+      return Response.json(
+        { items: [], stale: true, source: "FMP", error: `HTTP ${res.status} ${txt.slice(0,200)}` },
+        { status: 200 }
+      );
+    }
+
+    const json = (await res.json()) as FmpCal[];
+
+    const items: Row[] = (json || [])
       .filter(x => (x.country || "").toUpperCase() === "US")
       .map(x => {
-        // Build a Date in UTC from date + time if FMP gives both; else assume 13:30 UTC (common release time) to avoid blank
-        const when = (() => {
-          const base = x.date ? `${x.date}T00:00:00Z` : new Date().toISOString();
-          const d = new Date(base);
-          return d;
-        })();
-
+        // FMP sometimes omits time; we can keep only date and show UK time as "--"
+        const d = x.date ? new Date(`${x.date}T00:00:00Z`) : new Date();
         return {
-          timeUK: toUKTime(when),
+          timeUK: toUKTime(d),
           country: x.country || "US",
           release: x.event || "Unnamed release",
           actual: asStr(x.actual),
           previous: asStr(x.previous),
           consensus: asStr(x.estimate),
-          forecast: asStr(x.estimate), // FMP uses estimate; we mirror to forecast column
-          tier: pickTier(x),
+          forecast: asStr(x.estimate),
+          tier: pickTier(x.event, x.impact),
         };
       })
-      // simple de-dup + sort by UK time
-      .filter((r, idx, arr) => arr.findIndex(k => k.release === r.release && k.timeUK === r.timeUK) === idx)
+      .filter((r, i, arr) => arr.findIndex(k => k.release === r.release && k.timeUK === r.timeUK) === i)
       .sort((a, b) => a.timeUK.localeCompare(b.timeUK));
 
     return Response.json({ items, stale: false, source: "FMP" });
   } catch (e) {
-    return Response.json({ items: [], stale: true, error: (e as Error).message, source: "FMP" }, { status: 200 });
+    return Response.json(
+      { items: [], stale: true, source: "FMP", error: (e as Error).message },
+      { status: 200 }
+    );
   }
 }

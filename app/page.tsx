@@ -1,121 +1,258 @@
 // /app/page.tsx
-import React from 'react';
+import React from "react";
 
 type MacroRow = {
   time: string;
   country: string;
   release: string;
-  actual?: string | number | null;
-  previous?: string | number | null;
-  consensus?: string | number | null;
-  forecast?: string | number | null;
-  tier?: 'T1' | 'T2' | 'T3';
+  actual: string | null;
+  previous: string | null;
+  consensus: string | null;
+  forecast: string | null;
+  tier: "T1" | "T2" | "T3";
 };
 
-async function getMacro(): Promise<{ items: MacroRow[]; stale: boolean; source: string; error?: string }> {
-  const res = await fetch(`${process.env.NEXT_PUBLIC_BASE_URL ?? ''}/api/macro`, { cache: 'no-store' });
-  // In Vercel/production you can just fetch('/api/macro') from a Server Component as well:
-  // const res = await fetch('/api/macro', { cache: 'no-store' });
-  if (!res.ok) return { items: [], stale: true, source: 'macro', error: `HTTP ${res.status}` };
-  return res.json();
+type MacroResp = {
+  items?: MacroRow[];
+  stale?: boolean;
+  source?: string;
+  error?: string;
+};
+
+type SentimentResp = {
+  vix?: number | null;
+  putCall?: number | null;
+  aaii?: { bulls?: number | null; bears?: number | null } | null;
+  fearGreed?: number | null;
+  stale?: boolean;
+  sources?: string[];
+  updated?: string;
+  error?: string;
+};
+
+type EarningsRow = {
+  time?: string;
+  symbol?: string;
+  companyName?: string;
+  epsActual?: number | null;
+  epsEstimate?: number | null;
+  surprisePct?: number | null;
+  result?: "beat" | "miss" | "inline" | null;
+  mktCap?: number | null;
+};
+
+type EarningsResp = {
+  items?: EarningsRow[];
+  stale?: boolean;
+  source?: string;
+  error?: string;
+};
+
+async function getJSON<T>(path: string, fallback: T): Promise<T> {
+  try {
+    const res = await fetch(path, { cache: "no-store" });
+    if (!res.ok) {
+      // still return a safe object that includes an error
+      return { ...(fallback as any), error: `HTTP ${res.status}` } as T;
+    }
+    const data = (await res.json()) as T;
+    // ensure object-ness
+    if (data && typeof data === "object") return data;
+    return fallback;
+  } catch (e: any) {
+    return { ...(fallback as any), error: e?.message ?? "fetch failed" } as T;
+  }
 }
 
-function classForSurprise(actual?: number | null, consensus?: number | null) {
-  if (actual == null || consensus == null) return '';
-  if (actual > consensus) return 'text-emerald-400';
-  if (actual < consensus) return 'text-rose-400';
-  return '';
-}
-
-function asNum(x: any): number | null {
-  if (x === null || x === undefined || x === '') return null;
-  const n = Number(String(x).replace(/[,%]/g, '').trim());
-  return Number.isFinite(n) ? n : null;
-}
-
-function TierChip({ tier }: { tier?: 'T1' | 'T2' | 'T3' }) {
-  const map: Record<'T1'|'T2'|'T3', string> = {
-    T1: 'bg-rose-600/30 text-rose-200 border border-rose-600/40',
-    T2: 'bg-amber-600/30 text-amber-200 border border-amber-600/40',
-    T3: 'bg-sky-600/30 text-sky-200 border border-sky-600/40',
-  };
-  const label = tier ?? 'T3';
-  return <span className={`px-2 py-0.5 rounded text-xs ${map[label]}`}>{label}</span>;
+function cell(x: unknown): React.ReactNode {
+  if (x === null || x === undefined) return "—";
+  if (typeof x === "number") return Number.isFinite(x) ? x : "—";
+  const s = String(x).trim();
+  return s.length ? s : "—";
 }
 
 export default async function Page() {
-  const macro = await getMacro();
+  // Fetch in parallel, but safely
+  const [macro, senti, earnings] = await Promise.all([
+    getJSON<MacroResp>("/api/macro", { items: [], stale: true, source: "macro" }),
+    getJSON<SentimentResp>("/api/sentiment-snapshot", {
+      vix: null,
+      putCall: null,
+      aaii: { bulls: null, bears: null },
+      fearGreed: null,
+      stale: true,
+      sources: [],
+    }),
+    getJSON<EarningsResp>("/api/earnings-yday", { items: [], stale: true, source: "earnings" }),
+  ]);
+
+  const macroItems = Array.isArray(macro.items) ? macro.items : [];
+  const earningsItems = Array.isArray(earnings.items) ? earnings.items : [];
 
   return (
-    <main className="min-h-screen bg-[#0a0a0a] text-[#e5e5e5] px-6 py-8">
-      <h1 className="text-2xl font-semibold mb-1">Morning Update</h1>
-      <p className="text-sm opacity-70 mb-6">All times UK</p>
+    <main className="min-h-screen bg-black text-neutral-200 px-6 py-8">
+      <h1 className="text-2xl font-semibold mb-2">Morning Update</h1>
+      <p className="text-xs text-neutral-400 mb-6">All times UK</p>
 
-      {/* Macro table */}
+      {/* ========= MAJOR US DATA TODAY ========= */}
       <section className="mb-8">
-        <div className="rounded-xl bg-zinc-900/50 border border-zinc-800">
-          <div className="flex items-center justify-between px-4 py-3 border-b border-zinc-800">
+        <div className="rounded-xl bg-neutral-900/60 ring-1 ring-neutral-800">
+          <div className="flex items-center justify-between px-4 py-3 border-b border-neutral-800">
             <div className="font-medium">Major US data today</div>
-            <div className="flex gap-2 text-xs">
-              <TierChip tier="T1" />
-              <TierChip tier="T2" />
-              <TierChip tier="T3" />
+            <div className="text-xs text-neutral-400 space-x-2">
+              <span className="inline-block rounded bg-red-900/40 px-2 py-0.5">Tier 1</span>
+              <span className="inline-block rounded bg-amber-900/40 px-2 py-0.5">Tier 2</span>
+              <span className="inline-block rounded bg-sky-900/40 px-2 py-0.5">Tier 3</span>
             </div>
           </div>
 
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
-              <thead className="text-zinc-400">
-                <tr className="border-b border-zinc-800">
+              <thead className="bg-neutral-900/80">
+                <tr className="text-neutral-400">
                   <th className="text-left px-4 py-2">Time</th>
                   <th className="text-left px-4 py-2">Country</th>
                   <th className="text-left px-4 py-2">Release</th>
-                  <th className="text-right px-4 py-2">Actual</th>
-                  <th className="text-right px-4 py-2">Previous</th>
-                  <th className="text-right px-4 py-2">Consensus</th>
-                  <th className="text-right px-4 py-2">Forecast</th>
-                  <th className="text-right px-4 py-2">Tier</th>
+                  <th className="text-left px-4 py-2">Actual</th>
+                  <th className="text-left px-4 py-2">Previous</th>
+                  <th className="text-left px-4 py-2">Consensus</th>
+                  <th className="text-left px-4 py-2">Forecast</th>
+                  <th className="text-left px-4 py-2">Tier</th>
                 </tr>
               </thead>
               <tbody>
-                {macro.items.length === 0 ? (
+                {macroItems.length === 0 ? (
                   <tr>
-                    <td colSpan={8} className="px-4 py-6 text-zinc-500">
-                      No items for today (or the source returned none).
+                    <td className="px-4 py-4 text-neutral-400" colSpan={8}>
+                      No items for today (or the source returned none).{" "}
+                      {macro?.error ? (
+                        <span className="text-red-400">— {macro.error}</span>
+                      ) : (
+                        <span className="text-neutral-500">
+                          {macro?.stale ? "Using cached/fallback data." : ""}
+                        </span>
+                      )}
                     </td>
                   </tr>
                 ) : (
-                  macro.items.map((r, i) => {
-                    const a = asNum(r.actual);
-                    const c = asNum(r.consensus);
-                    const color = classForSurprise(a, c);
-                    return (
-                      <tr key={i} className="border-b border-zinc-900">
-                        <td className="px-4 py-2">{r.time || '—'}</td>
-                        <td className="px-4 py-2">{r.country || 'US'}</td>
-                        <td className="px-4 py-2">{r.release}</td>
-                        <td className={`px-4 py-2 text-right ${color}`}>{r.actual ?? '—'}</td>
-                        <td className="px-4 py-2 text-right">{r.previous ?? '—'}</td>
-                        <td className="px-4 py-2 text-right">{r.consensus ?? '—'}</td>
-                        <td className="px-4 py-2 text-right">{r.forecast ?? '—'}</td>
-                        <td className="px-4 py-2 text-right"><TierChip tier={r.tier} /></td>
-                      </tr>
-                    );
-                  })
+                  macroItems.map((r, i) => (
+                    <tr key={i} className="border-t border-neutral-800">
+                      <td className="px-4 py-2">{cell(r.time)}</td>
+                      <td className="px-4 py-2">{cell(r.country)}</td>
+                      <td className="px-4 py-2">{cell(r.release)}</td>
+                      <td className="px-4 py-2">{cell(r.actual)}</td>
+                      <td className="px-4 py-2">{cell(r.previous)}</td>
+                      <td className="px-4 py-2">{cell(r.consensus)}</td>
+                      <td className="px-4 py-2">{cell(r.forecast)}</td>
+                      <td className="px-4 py-2">{cell(r.tier)}</td>
+                    </tr>
+                  ))
                 )}
               </tbody>
             </table>
           </div>
 
-          {macro.error && (
-            <div className="px-4 py-2 text-xs text-amber-300/80 bg-amber-900/10 border-t border-amber-800/40">
-              Using cached/fallback data — {macro.error}
+          {(macro?.error || macro?.stale) && (
+            <div className="px-4 py-2 text-xs text-neutral-400 border-t border-neutral-800">
+              Source: {macro?.source ?? "—"}{" "}
+              {macro?.error ? <span className="text-red-400">— {macro.error}</span> : null}
             </div>
           )}
         </div>
       </section>
 
-      {/* Sentiment + options sections you already have can remain below… */}
+      {/* ========= SENTIMENT ========= */}
+      <section className="mb-8">
+        <div className="rounded-xl bg-neutral-900/60 ring-1 ring-neutral-800">
+          <div className="px-4 py-3 border-b border-neutral-800 font-medium">Sentiment</div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 p-4">
+            <div className="rounded-lg bg-neutral-950 p-4 ring-1 ring-neutral-800">
+              <div className="text-sm text-neutral-400 mb-1">VIX</div>
+              <div className="text-xl">{cell(senti?.vix)}</div>
+            </div>
+            <div className="rounded-lg bg-neutral-950 p-4 ring-1 ring-neutral-800">
+              <div className="text-sm text-neutral-400 mb-1">Put/Call (total)</div>
+              <div className="text-xl">{cell(senti?.putCall)}</div>
+            </div>
+            <div className="rounded-lg bg-neutral-950 p-4 ring-1 ring-neutral-800">
+              <div className="text-sm text-neutral-400 mb-1">AAII Bulls / Bears</div>
+              <div className="text-xl">
+                {cell(senti?.aaii?.bulls)} / {cell(senti?.aaii?.bears)}
+              </div>
+            </div>
+            <div className="rounded-lg bg-neutral-950 p-4 ring-1 ring-neutral-800">
+              <div className="text-sm text-neutral-400 mb-1">Fear &amp; Greed</div>
+              <div className="text-xl">{cell(senti?.fearGreed)}</div>
+            </div>
+          </div>
+          {(senti?.error || senti?.stale) && (
+            <div className="px-4 py-2 text-xs text-neutral-400 border-t border-neutral-800">
+              Sources: {(senti?.sources ?? []).join(", ") || "—"}{" "}
+              {senti?.error ? <span className="text-red-400">— {senti.error}</span> : null}
+            </div>
+          )}
+        </div>
+      </section>
+
+      {/* ========= YESTERDAY'S NOTABLE EARNINGS ========= */}
+      <section>
+        <div className="rounded-xl bg-neutral-900/60 ring-1 ring-neutral-800">
+          <div className="px-4 py-3 border-b border-neutral-800 font-medium">
+            Yesterday’s notable earnings (US)
+          </div>
+
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="bg-neutral-900/80 text-neutral-400">
+                <tr>
+                  <th className="text-left px-4 py-2">Time</th>
+                  <th className="text-left px-4 py-2">Symbol</th>
+                  <th className="text-left px-4 py-2">Company</th>
+                  <th className="text-left px-4 py-2">EPS (Actual / Est.)</th>
+                  <th className="text-left px-4 py-2">Surprise</th>
+                  <th className="text-left px-4 py-2">Result</th>
+                </tr>
+              </thead>
+              <tbody>
+                {earningsItems.length === 0 ? (
+                  <tr>
+                    <td className="px-4 py-4 text-neutral-400" colSpan={6}>
+                      No US earnings found for yesterday (or the source returned none).{" "}
+                      {earnings?.error ? (
+                        <span className="text-red-400">— {earnings.error}</span>
+                      ) : null}
+                    </td>
+                  </tr>
+                ) : (
+                  earningsItems.map((r, i) => (
+                    <tr key={i} className="border-t border-neutral-800">
+                      <td className="px-4 py-2">{cell(r.time)}</td>
+                      <td className="px-4 py-2">{cell(r.symbol)}</td>
+                      <td className="px-4 py-2">{cell(r.companyName)}</td>
+                      <td className="px-4 py-2">
+                        {cell(r.epsActual)} / {cell(r.epsEstimate)}
+                      </td>
+                      <td className="px-4 py-2">
+                        {r?.surprisePct === null || r?.surprisePct === undefined
+                          ? "—"
+                          : `${r.surprisePct > 0 ? "+" : ""}${r.surprisePct.toFixed(1)}%`}
+                      </td>
+                      <td className="px-4 py-2">{cell(r.result)}</td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+
+          {(earnings?.error || earnings?.stale) && (
+            <div className="px-4 py-2 text-xs text-neutral-400 border-t border-neutral-800">
+              Source: {earnings?.source ?? "—"}{" "}
+              {earnings?.error ? <span className="text-red-400">— {earnings.error}</span> : null}
+            </div>
+          )}
+        </div>
+      </section>
     </main>
   );
 }

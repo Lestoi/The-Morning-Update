@@ -18,18 +18,18 @@ function toNum(x: unknown): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
-function isYdayISO(dateStr?: string | null) {
+function isYdayISO(dateStr?: string | null): boolean {
   if (!dateStr) return false;
   const d = new Date(dateStr);
   if (Number.isNaN(d.valueOf())) return false;
-  // Compare calendar day in UTC
+
   const today = new Date();
-  const utc = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()));
-  const yday = new Date(utc);
+  const utcToday = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()));
+  const yday = new Date(utcToday);
   yday.setUTCDate(yday.getUTCDate() - 1);
 
-  const dd = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
-  return dd.getTime() === yday.getTime();
+  const dUTC = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+  return dUTC.getTime() === yday.getTime();
 }
 
 function tagSessionHint(name?: string | null): "BMO" | "AMC" | "TBD" | null {
@@ -40,23 +40,33 @@ function tagSessionHint(name?: string | null): "BMO" | "AMC" | "TBD" | null {
   return "TBD";
 }
 
-/** extremely small CSV parser (no nested quotes), good enough for AV CSV */
+/** tiny CSV parser (quoted fields supported; no multi-line fields) */
 function parseCsv(text: string): CsvRow[] {
-  const lines = text.trim().split(/\r?\n/);
+  const normalized = text.replace(/\r\n/g, "\n").trim();
+  if (!normalized) return [];
+
+  const lines: string[] = normalized.split("\n");
   if (lines.length === 0) return [];
-  const headers = lines[0].split(",").map(h => h.trim());
+
+  const headers: string[] = lines[0].split(",").map(h => h.trim());
   const out: CsvRow[] = [];
+
   for (let i = 1; i < lines.length; i++) {
-    const row = [];
+    const row: string[] = [];
     let cur = "";
     let inQ = false;
-    const s = lines[i];
+    const s: string = lines[i];
+
     for (let j = 0; j < s.length; j++) {
       const ch = s[j];
       if (ch === '"') {
-        // toggle quote unless escaped
-        if (inQ && s[j + 1] === '"') { cur += '"'; j++; }
-        else inQ = !inQ;
+        // if we see a doubled quote while inside a quoted field, treat as literal quote
+        if (inQ && s[j + 1] === '"') {
+          cur += '"';
+          j++;
+        } else {
+          inQ = !inQ;
+        }
       } else if (ch === "," && !inQ) {
         row.push(cur);
         cur = "";
@@ -65,10 +75,14 @@ function parseCsv(text: string): CsvRow[] {
       }
     }
     row.push(cur);
+
     const obj: CsvRow = {};
-    headers.forEach((h, idx) => { obj[h] = (row[idx] ?? "").trim(); });
+    headers.forEach((h, idx) => {
+      obj[h] = (row[idx] ?? "").trim();
+    });
     out.push(obj);
   }
+
   return out;
 }
 
@@ -82,37 +96,41 @@ export async function GET() {
       );
     }
 
-    // Force CSV so we always know what we’re parsing.
+    // Ask AV for CSV; we still gracefully handle JSON/plain-text if they send it.
     const url = new URL("https://www.alphavantage.co/query");
     url.searchParams.set("function", "EARNINGS_CALENDAR");
     url.searchParams.set("horizon", "3month");
-    url.searchParams.set("datatype", "csv"); // <- key line
+    url.searchParams.set("datatype", "csv");
     url.searchParams.set("apikey", key);
 
     const res = await fetch(url.toString(), { cache: "no-store", next: { revalidate: 0 } });
     const text = await res.text();
-    const ct = res.headers.get("content-type") || "";
 
-    // Rate limit / error notes can be text or HTML. Detect those first.
-    const plainErr =
+    // Some AV responses are plain-text "Thank you for using Alpha Vantage" or rate-limit notes.
+    const looksLikePlainError =
       /thank you for using alpha vantage/i.test(text) ||
       /standard api call frequency/i.test(text) ||
       /invalid api call/i.test(text) ||
       /error/i.test(text);
 
-    // Try CSV first (we requested csv)
     let rows: CsvRow[] = [];
-    if (!plainErr) {
+
+    if (!looksLikePlainError) {
+      // try CSV first (we requested it)
       try {
         rows = parseCsv(text);
       } catch {
-        // If CSV parsing somehow fails, try JSON as fallback
+        rows = [];
+      }
+
+      // if CSV parse yields nothing, try JSON as a fallback
+      if (rows.length === 0) {
         try {
-          const j = JSON.parse(text);
-          // normalize to array if JSON
-          rows = Array.isArray(j?.earningsCalendar) ? j.earningsCalendar :
-                 Array.isArray(j?.EarningsCalendar) ? j.EarningsCalendar :
-                 Array.isArray(j) ? j : [];
+          const j: unknown = JSON.parse(text);
+          const anyJ = j as any;
+          if (Array.isArray(anyJ?.earningsCalendar)) rows = anyJ.earningsCalendar as CsvRow[];
+          else if (Array.isArray(anyJ?.EarningsCalendar)) rows = anyJ.EarningsCalendar as CsvRow[];
+          else if (Array.isArray(anyJ)) rows = anyJ as CsvRow[];
         } catch {
           // neither CSV nor JSON
         }
@@ -139,23 +157,24 @@ export async function GET() {
         };
       });
 
-    // Build response
-    const errorMsg = plainErr
-      ? "Alpha Vantage note/limit or non-CSV response"
-      : (rows.length === 0 ? "No rows parsed (CSV/JSON empty or horizon too short)" : undefined);
+    const errorMsg =
+      looksLikePlainError
+        ? "Alpha Vantage note/limit or non-CSV response"
+        : (rows.length === 0 ? "No rows parsed (CSV/JSON empty or horizon too short)" : undefined);
 
     return new Response(
       JSON.stringify({
         items: mapped,
         stale: !!errorMsg || mapped.length === 0,
         source: "Alpha Vantage",
-        ...(errorMsg ? { error: errorMsg } : {}),
+        ...(errorMsg ? { error: errorMsg } : {})
       }),
       { status: 200, headers: { "content-type": "application/json" } }
     );
-  } catch (err: any) {
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : "Unhandled error";
     return new Response(
-      JSON.stringify({ items: [], stale: true, source: "Alpha Vantage", error: err?.message ?? "Unhandled error" }),
+      JSON.stringify({ items: [], stale: true, source: "Alpha Vantage", error: msg }),
       { status: 200, headers: { "content-type": "application/json" } }
     );
   }

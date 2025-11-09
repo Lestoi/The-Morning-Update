@@ -3,116 +3,164 @@ export const dynamic = 'force-dynamic';
 
 import { NextResponse } from 'next/server';
 
-type EconDbItem = {
-  date: string;            // ISO date (UTC)
-  country: string;         // e.g. "US"
-  ticker: string | null;   // econ series code
-  event: string;           // event name
-  actual: number | string | null;
-  previous: number | string | null;
-  consensus: number | string | null;
-  forecast: number | string | null;
-  importance: number | null; // 1..3 typically
-  time?: string | null;      // HH:MM in UTC if present
-};
-
+// --- Types you already expect on the page ---
 type MacroRow = {
-  time: string | null;
-  country: string;
-  release: string;
-  actual: string | null;
-  previous: string | null;
-  consensus: string | null;
-  forecast: string | null;
-  tier: 'T1' | 'T2' | 'T3' | null;
+  time: string;        // e.g., "13:30"
+  country: string;     // e.g., "US"
+  release: string;     // name
+  actual?: string | number | null;
+  previous?: string | number | null;
+  consensus?: string | number | null;
+  forecast?: string | number | null;
+  tier?: 'T1' | 'T2' | 'T3';
 };
 
-function toUKClockLabel(dateISO: string, timeUTC?: string | null): string | null {
-  // If API provides a time (UTC), render local (UK) clock label like "13:30"
-  try {
-    if (!timeUTC) return null;
-    const [h, m] = timeUTC.split(':').map(Number);
-    const d = new Date(dateISO);
-    d.setUTCHours(h, m || 0, 0, 0);
-    // UK is Europe/London; let the browser/env format to HH:MM using locale en-GB
-    return d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/London' });
-  } catch {
-    return null;
-  }
+function toUKTimeLabel(isoOrDate: string) {
+  // EconDB sends date + time (UTC). We show UK time label.
+  const d = new Date(isoOrDate);
+  // Format HH:MM (24h) UK
+  return new Intl.DateTimeFormat('en-GB', {
+    hour: '2-digit',
+    minute: '2-digit',
+    timeZone: 'Europe/London',
+    hour12: false,
+  }).format(d);
 }
 
-function toTier(importance: number | null): MacroRow['tier'] {
-  if (importance == null) return null;
-  if (importance >= 3) return 'T1';
-  if (importance === 2) return 'T2';
-  return 'T3';
+// Optional: Light normalization to numeric where safe
+function numOrNull(v: any): number | null {
+  if (v === null || v === undefined) return null;
+  const n = Number(
+    String(v)
+      .replace(/[,%]/g, '') // strip commas and %
+      .trim()
+  );
+  return Number.isFinite(n) ? n : null;
 }
 
-function fmt(val: unknown): string | null {
-  if (val == null) return null;
-  const s = String(val).trim();
-  return s.length ? s : null;
+// --- Tier override map (you can tweak anytime) ---
+const TIER_OVERRIDES: Record<string, 'T1' | 'T2' | 'T3'> = {
+  'Nonfarm Payrolls': 'T1',
+  'Unemployment Rate': 'T1',
+  'CPI (YoY)': 'T1',
+  'CPI (MoM)': 'T1',
+  'Core CPI (YoY)': 'T1',
+  'Core CPI (MoM)': 'T1',
+  'Core PCE Price Index (YoY)': 'T1',
+  'Core PCE Price Index (MoM)': 'T1',
+  'ISM Manufacturing PMI': 'T1',
+  'ISM Services PMI': 'T1',
+  'Michigan Consumer Sentiment': 'T2',
+  'Baker Hughes Rig Count': 'T3',
+};
+
+// EconDB → our label harmonizer. You can add mappings as you see them.
+function mapEconDBNameToRelease(e: any): string {
+  const raw = (e?.event || e?.name || '').trim();
+
+  // A few fast paths:
+  if (/nonfarm payroll/i.test(raw)) return 'Nonfarm Payrolls';
+  if (/unemployment rate/i.test(raw)) return 'Unemployment Rate';
+  if (/core pce/i.test(raw) && /yoy/i.test(raw)) return 'Core PCE Price Index (YoY)';
+  if (/core pce/i.test(raw) && /mom/i.test(raw)) return 'Core PCE Price Index (MoM)';
+  if (/core cpi/i.test(raw) && /yoy/i.test(raw)) return 'Core CPI (YoY)';
+  if (/core cpi/i.test(raw) && /mom/i.test(raw)) return 'Core CPI (MoM)';
+  if (/cpi/i.test(raw) && /yoy/i.test(raw)) return 'CPI (YoY)';
+  if (/cpi/i.test(raw) && /mom/i.test(raw)) return 'CPI (MoM)';
+  if (/ism.*manufact/i.test(raw)) return 'ISM Manufacturing PMI';
+  if (/ism.*services/i.test(raw)) return 'ISM Services PMI';
+  if (/michigan/i.test(raw) && /sentiment/i.test(raw)) return 'Michigan Consumer Sentiment';
+  if (/baker.*rig/i.test(raw)) return 'Baker Hughes Rig Count';
+
+  return raw || 'Unnamed release';
+}
+
+function tierForRelease(name: string): 'T1' | 'T2' | 'T3' {
+  return TIER_OVERRIDES[name] ?? 'T3';
+}
+
+function todayISO() {
+  // one calendar day in UTC
+  const now = new Date();
+  const y = now.getUTCFullYear();
+  const m = `${now.getUTCMonth() + 1}`.padStart(2, '0');
+  const d = `${now.getUTCDate()}`.padStart(2, '0');
+  return `${y}-${m}-${d}`;
 }
 
 export async function GET() {
-  const apiKey = process.env.ECONDB_API_KEY;
-  const today = new Date();
-  const yyyy = today.getUTCFullYear();
-  const mm = String(today.getUTCMonth() + 1).padStart(2, '0');
-  const dd = String(today.getUTCDate()).padStart(2, '0');
-  const iso = `${yyyy}-${mm}-${dd}`;
-
+  const token = process.env.ECONDB_API_KEY;
   const items: MacroRow[] = [];
-  let error: string | null = null;
-  let source = 'EconDB';
 
-  try {
-    if (!apiKey) {
-      throw new Error('Missing ECONDB_API_KEY');
-    }
-
-    // EconDB calendar endpoint: US releases on the given date
-    const url = `https://www.econdb.com/api/calendar/?countries=US&start=${iso}&end=${iso}&format=json&api_key=${apiKey}`;
-    const res = await fetch(url, { cache: 'no-store' });
-    if (!res.ok) {
-      throw new Error(`EconDB HTTP ${res.status}`);
-    }
-    const data = (await res.json()) as { data?: EconDbItem[] };
-
-    const rows = (data?.data ?? [])
-      .filter(x => (x.country || '').toUpperCase() === 'US')
-      .map<MacroRow>((x) => ({
-        time: toUKClockLabel(x.date, x.time ?? null),
-        country: 'US',
-        release: x.event,
-        actual: fmt(x.actual),
-        previous: fmt(x.previous),
-        consensus: fmt(x.consensus),
-        forecast: fmt(x.forecast),
-        tier: toTier(x.importance),
-      }));
-
-    // Sort: T1 first, by time
-    const tierRank = (t: MacroRow['tier']) => (t === 'T1' ? 0 : t === 'T2' ? 1 : t === 'T3' ? 2 : 3);
-    rows.sort((a, b) => {
-      const tr = tierRank(a.tier) - tierRank(b.tier);
-      if (tr !== 0) return tr;
-      // time ascending (nulls last)
-      if (a.time && b.time) return a.time.localeCompare(b.time);
-      if (a.time && !b.time) return -1;
-      if (!a.time && b.time) return 1;
-      return a.release.localeCompare(b.release);
-    });
-
-    items.push(...rows);
-  } catch (e: any) {
-    error = e?.message || 'calendar fetch failed';
+  if (!token) {
+    return NextResponse.json(
+      { items, stale: true, source: 'EconDB', error: 'Missing ECONDB_API_KEY' },
+      { status: 200 },
+    );
   }
 
-  return NextResponse.json({
-    items,
-    stale: !!error,
-    source,
-    error: error || undefined,
-  });
+  try {
+    // EconDB calendar — US for today
+    // Docs: https://www.econdb.com/api/calendar/
+    const date = todayISO();
+    const url = new URL('https://www.econdb.com/api/calendar/');
+    url.searchParams.set('countries', 'US');
+    url.searchParams.set('date_from', date);
+    url.searchParams.set('date_to', date);
+    url.searchParams.set('token', token);
+
+    const resp = await fetch(url.toString(), {
+      // small cache so the route doesn’t hammer EconDB if many users open at once
+      next: { revalidate: 90 },
+    });
+
+    if (!resp.ok) {
+      return NextResponse.json(
+        { items: [], stale: true, source: 'EconDB', error: `HTTP ${resp.status}` },
+        { status: 200 },
+      );
+    }
+
+    const json = await resp.json();
+
+    // EconDB returns { data: [ ...events ] } (shape can vary; we guard safely)
+    const arr = Array.isArray(json?.data) ? json.data : [];
+
+    for (const e of arr) {
+      // EconDB often has fields like:
+      // e.datetime (UTC timestamp), e.country, e.event, e.actual, e.previous, e.consensus, e.forecast
+      const releaseName = mapEconDBNameToRelease(e);
+      const timeLabel = e?.datetime ? toUKTimeLabel(e.datetime) : '—';
+
+      items.push({
+        time: timeLabel,
+        country: e?.country || 'US',
+        release: releaseName,
+        actual: e?.actual ?? null,
+        previous: e?.previous ?? null,
+        consensus: e?.consensus ?? null,
+        forecast: e?.forecast ?? null,
+        tier: tierForRelease(releaseName),
+      });
+    }
+
+    // Sort by (1) time, (2) tier (T1 → T3), then name
+    const tierRank: Record<'T1'|'T2'|'T3', number> = { T1: 1, T2: 2, T3: 3 };
+    items.sort((a, b) => {
+      const tA = a.time ?? '';
+      const tB = b.time ?? '';
+      if (tA !== tB) return tA.localeCompare(tB);
+      const rA = tierRank[a.tier ?? 'T3'];
+      const rB = tierRank[b.tier ?? 'T3'];
+      if (rA !== rB) return rA - rB;
+      return (a.release || '').localeCompare(b.release || '');
+    });
+
+    return NextResponse.json({ items, stale: false, source: 'EconDB' }, { status: 200 });
+  } catch (err: any) {
+    return NextResponse.json(
+      { items: [], stale: true, source: 'EconDB', error: String(err?.message || err) },
+      { status: 200 },
+    );
+  }
 }

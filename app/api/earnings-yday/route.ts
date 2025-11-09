@@ -20,17 +20,20 @@ type Item = {
   epsActual: number | null;
   epsEstimate: number | null;
   surprisePct: number | null;
-  mktCap: number | null; // not supplied by AV; we leave null for now
+  mktCap: number | null;
 };
 
 async function fetchAlphaVantage() {
   const key = process.env.ALPHA_VANTAGE_KEY;
   if (!key) {
-    return { items: [], stale: true, source: "Alpha Vantage", error: "Missing ALPHA_VANTAGE_KEY" };
+    return {
+      items: [],
+      stale: true,
+      source: "Alpha Vantage",
+      error: "Missing ALPHA_VANTAGE_KEY",
+    };
   }
 
-  // calendar docs: https://www.alphavantage.co/documentation/#earnings-calendar
-  // returns the next horizon (3/6/12 months); we filter by date == yesterday
   const url = `https://www.alphavantage.co/query?function=EARNINGS_CALENDAR&horizon=3month&apikey=${key}`;
   const r = await fetch(url, {
     headers: {
@@ -39,28 +42,37 @@ async function fetchAlphaVantage() {
     },
     next: { revalidate: 600 },
   });
+
   if (!r.ok) {
-    return { items: [], stale: true, source: "Alpha Vantage", error: `HTTP ${r.status}` };
+    return {
+      items: [],
+      stale: true,
+      source: "Alpha Vantage",
+      error: `HTTP ${r.status}`,
+    };
   }
+
   const data = await r.json();
   const raw = Array.isArray(data?.earningsCalendar) ? data.earningsCalendar : [];
-
   const yday = previousUSMarketDay();
   const rows = raw.filter((x: any) => x?.reportDate === yday);
 
-  // Map to our display model. Alpha Vantage does not supply BMO/AMC reliably -> set TBD
   const items: Item[] = rows.slice(0, 30).map((x: any) => {
     const est = x?.estimate != null ? Number(x.estimate) : null;
     const act = x?.eps != null ? Number(x.eps) : null;
-    const surprisePct =
+    const surprise =
       est != null && act != null && est !== 0 ? ((act - est) / Math.abs(est)) * 100 : null;
+
     return {
       time: "TBD",
       symbol: x?.symbol ?? "",
       companyName: x?.name ?? x?.symbol ?? "",
       epsActual: Number.isFinite(act) ? act : null,
       epsEstimate: Number.isFinite(est) ? est : null,
-      surprisePct: Number.isFinite(surprisePct) ? Number(surprisePct.toFixed(1)) : null,
+      surprisePct:
+        surprise != null && Number.isFinite(surprise)
+          ? Number(surprise.toFixed(1))
+          : null,
       mktCap: null,
     };
   });

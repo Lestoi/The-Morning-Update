@@ -13,7 +13,6 @@ type Snapshot = {
 };
 
 async function getSnapshot(): Promise<Snapshot> {
-  // Always prefer relative fetch on the server (works on Vercel & locally)
   const r = await fetch("/api/sentiment-snapshot", { cache: "no-store" }).catch(() => null);
   if (!r || !r.ok) {
     return {
@@ -57,7 +56,6 @@ export default async function Page() {
   const bull = snap.aaii?.bull ?? null;
   const bear = snap.aaii?.bear ?? null;
 
-  // Only show the yellow note if truly everything failed
   const showError =
     !!snap.error &&
     snap.vix == null &&
@@ -113,7 +111,7 @@ export default async function Page() {
         </div>
       </section>
 
-      {/* Earnings block left as-is */}
+      {/* Earnings table unchanged */}
       <section className="mt-8 rounded-lg border border-zinc-800 bg-zinc-900/40 p-4">
         <h2 className="text-lg font-medium text-zinc-200">Yesterday’s notable earnings (US)</h2>
         <p className="text-xs text-zinc-500">

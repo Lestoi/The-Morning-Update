@@ -1,86 +1,149 @@
-// /app/api/earnings-yday/route.ts
-export const dynamic = "force-dynamic";
+// app/api/earnings-yday/route.ts
+export const runtime = "edge";           // fast & cheap
+export const dynamic = "force-dynamic";  // don't cache between deploys
 
-import { NextResponse } from "next/server";
+type AvCalendarItem = {
+  symbol?: string;
+  name?: string;
+  reportDate?: string;       // AV field
+  report_date?: string;      // sometimes they use snake_case
+  fiscalDateEnding?: string;
+  epsEstimated?: string | number | null;
+  epsReported?: string | number | null;
+  surprisePercentage?: string | number | null;
+  timezone?: string;
+  updatedFromDate?: string;
+  currency?: string;
+  marketCap?: string | number | null;
+};
 
-/** Previous US market day (ignores holidays, good enough for now). */
-function previousUSMarketDay(d = new Date()): string {
-  const t = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
-  // go back one day until Mon–Fri
-  do {
-    t.setUTCDate(t.getUTCDate() - 1);
-  } while ([0, 6].includes(t.getUTCDay())); // Sun=0, Sat=6
-  return t.toISOString().slice(0, 10);
-}
-
-type Item = {
-  time: "BMO" | "AMC" | "TBD";
-  symbol: string;
-  companyName: string;
+type OutItem = {
+  time: string | null;       // BMO/AMC/TBD if we can infer, else null
+  symbol: string | null;
+  companyName: string | null;
   epsActual: number | null;
   epsEstimate: number | null;
   surprisePct: number | null;
-  mktCap: number | null;
 };
 
-async function fetchAlphaVantage() {
-  const key = process.env.ALPHA_VANTAGE_KEY;
-  if (!key) {
-    return {
-      items: [],
-      stale: true,
-      source: "Alpha Vantage",
-      error: "Missing ALPHA_VANTAGE_KEY",
-    };
-  }
-
-  const url = `https://www.alphavantage.co/query?function=EARNINGS_CALENDAR&horizon=3month&apikey=${key}`;
-  const r = await fetch(url, {
-    headers: {
-      "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
-    },
-    next: { revalidate: 600 },
-  });
-
-  if (!r.ok) {
-    return {
-      items: [],
-      stale: true,
-      source: "Alpha Vantage",
-      error: `HTTP ${r.status}`,
-    };
-  }
-
-  const data = await r.json();
-  const raw = Array.isArray(data?.earningsCalendar) ? data.earningsCalendar : [];
-  const yday = previousUSMarketDay();
-  const rows = raw.filter((x: any) => x?.reportDate === yday);
-
-  const items: Item[] = rows.slice(0, 30).map((x: any) => {
-    const est = x?.estimate != null ? Number(x.estimate) : null;
-    const act = x?.eps != null ? Number(x.eps) : null;
-    const surprise =
-      est != null && act != null && est !== 0 ? ((act - est) / Math.abs(est)) * 100 : null;
-
-    return {
-      time: "TBD",
-      symbol: x?.symbol ?? "",
-      companyName: x?.name ?? x?.symbol ?? "",
-      epsActual: Number.isFinite(act) ? act : null,
-      epsEstimate: Number.isFinite(est) ? est : null,
-      surprisePct:
-        surprise != null && Number.isFinite(surprise)
-          ? Number(surprise.toFixed(1))
-          : null,
-      mktCap: null,
-    };
-  });
-
-  return { items, stale: false, source: "Alpha Vantage" };
+function toNum(x: unknown): number | null {
+  const n = Number(x);
+  return Number.isFinite(n) ? n : null;
 }
 
-export async function GET() {
-  const res = await fetchAlphaVantage();
-  return NextResponse.json(res, { headers: { "Cache-Control": "no-store" } });
+function isYday(dateStr?: string | null) {
+  if (!dateStr) return false;
+  // Treat everything in UTC to avoid client TZ drift:
+  const today = new Date();
+  const utc = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()));
+  const yday = new Date(utc);
+  yday.setUTCDate(yday.getUTCDate() - 1);
+
+  const d = new Date(dateStr);
+  const dd = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+  return dd.getTime() === yday.getTime();
+}
+
+function tagSessionHint(name?: string): "BMO" | "AMC" | "TBD" | null {
+  if (!name) return null;
+  const n = name.toLowerCase();
+  if (n.includes("pre") || n.includes("before open") || n.includes("bmo")) return "BMO";
+  if (n.includes("after") || n.includes("post") || n.includes("amc")) return "AMC";
+  return "TBD";
+}
+
+export async function GET(req: Request) {
+  try {
+    const key = process.env.ALPHA_VANTAGE_KEY;
+    if (!key) {
+      // Never 500 for missing key; return a JSON error so the UI can show a stale state
+      return new Response(
+        JSON.stringify({ items: [], stale: true, source: "Alpha Vantage", error: "Missing ALPHA_VANTAGE_KEY" }),
+        { status: 200, headers: { "content-type": "application/json" } }
+      );
+    }
+
+    // AV free plan: earnings calendar is here
+    const url = new URL("https://www.alphavantage.co/query");
+    url.searchParams.set("function", "EARNINGS_CALENDAR");
+    // horizon can be between 3month and 12month; we only filter yesterday anyway
+    url.searchParams.set("horizon", "3month");
+    url.searchParams.set("apikey", key);
+
+    const r = await fetch(url.toString(), { cache: "no-store", next: { revalidate: 0 } });
+
+    // If AV returns 200 with a rate-limit message, still parse safely:
+    const text = await r.text();
+    let json: any = {};
+    try {
+      json = text ? JSON.parse(text) : {};
+    } catch {
+      return new Response(
+        JSON.stringify({ items: [], stale: true, source: "Alpha Vantage", error: `Bad JSON from AV (${r.status})` }),
+        { status: 200, headers: { "content-type": "application/json" } }
+      );
+    }
+
+    // Guard for AV special keys (Note, Information, Error Message)
+    const avError =
+      json?.Note ||
+      json?.Information ||
+      json?.["Error Message"] ||
+      (r.status !== 200 ? `HTTP ${r.status}` : null);
+
+    // Data array can be under different keys; normalize:
+    const raw: AvCalendarItem[] =
+      Array.isArray(json?.earningsCalendar) ? json.earningsCalendar :
+      Array.isArray(json?.EarningsCalendar) ? json.EarningsCalendar :
+      Array.isArray(json) ? json :
+      [];
+
+    // Filter to yesterday and US-heavy names only (you can refine)
+    const ydayItems = raw.filter((row) =>
+      isYday(row.reportDate ?? (row as any).report_date)
+    );
+
+    const mapped: OutItem[] = ydayItems.map((row) => {
+      const reported = row.reportDate ?? (row as any).report_date ?? null;
+      const epsAct = toNum(row.epsReported);
+      const epsEst = toNum(row.epsEstimated);
+      const surprise =
+        epsAct !== null && epsEst !== null && epsEst !== 0
+          ? Number(((epsAct - epsEst) / Math.abs(epsEst) * 100).toFixed(1))
+          : toNum(row.surprisePercentage);
+
+      return {
+        time: tagSessionHint(row.name),
+        symbol: row.symbol ?? null,
+        companyName: row.name ?? null,
+        epsActual: epsAct,
+        epsEstimate: epsEst,
+        surprisePct: surprise ?? null,
+      };
+    });
+
+    // If AV errored or returned empty, keep stale=true so UI can show “cached/fallback”
+    const resp = {
+      items: mapped,
+      stale: !!avError || mapped.length === 0,
+      source: "Alpha Vantage",
+      ...(avError ? { error: String(avError) } : {}),
+    };
+
+    return new Response(JSON.stringify(resp), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  } catch (err: any) {
+    // Final safety net — never crash the route
+    return new Response(
+      JSON.stringify({
+        items: [],
+        stale: true,
+        source: "Alpha Vantage",
+        error: err?.message ?? "Unhandled server error",
+      }),
+      { status: 200, headers: { "content-type": "application/json" } }
+    );
+  }
 }

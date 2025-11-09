@@ -1,5 +1,6 @@
-// /app/page.tsx
+// app/page.tsx
 import React from "react";
+import { headers } from "next/headers";
 
 type MacroRow = {
   time: string;
@@ -11,13 +12,7 @@ type MacroRow = {
   forecast: string | null;
   tier: "T1" | "T2" | "T3";
 };
-
-type MacroResp = {
-  items?: MacroRow[];
-  stale?: boolean;
-  source?: string;
-  error?: string;
-};
+type MacroResp = { items?: MacroRow[]; stale?: boolean; source?: string; error?: string };
 
 type SentimentResp = {
   vix?: number | null;
@@ -40,27 +35,32 @@ type EarningsRow = {
   result?: "beat" | "miss" | "inline" | null;
   mktCap?: number | null;
 };
+type EarningsResp = { items?: EarningsRow[]; stale?: boolean; source?: string; error?: string };
 
-type EarningsResp = {
-  items?: EarningsRow[];
-  stale?: boolean;
-  source?: string;
-  error?: string;
-};
+// Build an absolute URL from a relative path using the current request headers
+function abs(path: string): string {
+  const h = headers();
+  const host =
+    h.get("x-forwarded-host") ||
+    h.get("host") ||
+    process.env.VERCEL_URL ||
+    "localhost:3000";
+  const proto = h.get("x-forwarded-proto") || (host.includes("localhost") ? "http" : "https");
+  return `${proto}://${host}${path.startsWith("/") ? path : `/${path}`}`;
+}
 
 async function getJSON<T>(path: string, fallback: T): Promise<T> {
+  const url = path.startsWith("http") ? path : abs(path);
   try {
-    const res = await fetch(path, { cache: "no-store" });
+    const res = await fetch(url, { cache: "no-store" });
     if (!res.ok) {
-      // still return a safe object that includes an error
-      return { ...(fallback as any), error: `HTTP ${res.status}` } as T;
+      return { ...(fallback as any), error: `HTTP ${res.status} from ${path}` } as T;
     }
     const data = (await res.json()) as T;
-    // ensure object-ness
     if (data && typeof data === "object") return data;
     return fallback;
   } catch (e: any) {
-    return { ...(fallback as any), error: e?.message ?? "fetch failed" } as T;
+    return { ...(fallback as any), error: e?.message ?? `Failed to parse URL from ${path}` } as T;
   }
 }
 
@@ -72,7 +72,6 @@ function cell(x: unknown): React.ReactNode {
 }
 
 export default async function Page() {
-  // Fetch in parallel, but safely
   const [macro, senti, earnings] = await Promise.all([
     getJSON<MacroResp>("/api/macro", { items: [], stale: true, source: "macro" }),
     getJSON<SentimentResp>("/api/sentiment-snapshot", {
@@ -94,7 +93,7 @@ export default async function Page() {
       <h1 className="text-2xl font-semibold mb-2">Morning Update</h1>
       <p className="text-xs text-neutral-400 mb-6">All times UK</p>
 
-      {/* ========= MAJOR US DATA TODAY ========= */}
+      {/* ====== Major US data today ====== */}
       <section className="mb-8">
         <div className="rounded-xl bg-neutral-900/60 ring-1 ring-neutral-800">
           <div className="flex items-center justify-between px-4 py-3 border-b border-neutral-800">
@@ -161,7 +160,7 @@ export default async function Page() {
         </div>
       </section>
 
-      {/* ========= SENTIMENT ========= */}
+      {/* ====== Sentiment ====== */}
       <section className="mb-8">
         <div className="rounded-xl bg-neutral-900/60 ring-1 ring-neutral-800">
           <div className="px-4 py-3 border-b border-neutral-800 font-medium">Sentiment</div>
@@ -194,7 +193,7 @@ export default async function Page() {
         </div>
       </section>
 
-      {/* ========= YESTERDAY'S NOTABLE EARNINGS ========= */}
+      {/* ====== Yesterday’s notable earnings (US) ====== */}
       <section>
         <div className="rounded-xl bg-neutral-900/60 ring-1 ring-neutral-800">
           <div className="px-4 py-3 border-b border-neutral-800 font-medium">

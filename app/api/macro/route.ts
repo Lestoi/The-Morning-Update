@@ -1,18 +1,12 @@
-// /app/api/macro/route.ts
+// /app/api/macro/route.ts  — FRED-based macro calendar
 export const dynamic = "force-dynamic";
-export const runtime = "nodejs"; // ensure Node runtime on Vercel
+export const runtime = "nodejs";
 
-type FmpV4Row = {
-  date?: string;          // ISO like "2025-11-08 13:30:00"
-  country?: string;       // e.g., "US"
-  event?: string;         // e.g., "Nonfarm Payrolls"
-  actual?: string | number | null;
-  previous?: string | number | null;
-  consensus?: string | number | null; // v4 frequently uses consensus
-  estimate?: string | number | null;  // sometimes present
-  impact?: string | null;             // "High"/"Medium"/"Low" or null
-  time?: string | null;               // sometimes separate time field
-};
+type FredReleaseDate = { date: string; release_id: number };
+type FredReleaseDatesResp = { release_dates?: FredReleaseDate[] };
+
+type FredRelease = { id: number; name: string; press_release: boolean; link?: string };
+type FredReleaseListResp = { releases?: FredRelease[] };
 
 type Row = {
   timeUK: string;
@@ -25,9 +19,18 @@ type Row = {
   tier: "T1" | "T2" | "T3";
 };
 
-const TIER1 = [
-  "Nonfarm Payrolls", "Unemployment Rate", "CPI", "Core CPI",
-  "PCE Price Index", "Core PCE", "FOMC Rate Decision", "GDP", "Core PPI",
+const IMPORTANT_KEYWORDS = [
+  // Tier-1 words
+  "nonfarm payroll", "employment situation",
+  "consumer price index", "cpi", "core cpi",
+  "pce", "core pce",
+  "gdp", "gross domestic product",
+  "fomc", "interest rate decision", "fed funds",
+  "producer price index", "ppi", "core ppi",
+  "retail sales",
+  "ism manufacturing", "ism services",
+  "michigan sentiment", "consumer sentiment",
+  "jobless claims",
 ];
 
 function toISODate(d = new Date()) {
@@ -46,84 +49,82 @@ function toUKTime(date: Date) {
   }).format(date);
 }
 
-function pickTier(e?: string, impact?: string | null): "T1" | "T2" | "T3" {
-  const name = (e || "").toLowerCase();
-  if (TIER1.some(x => name.includes(x.toLowerCase()))) return "T1";
-  const imp = (impact || "").toLowerCase();
-  if (imp.includes("high")) return "T1";
-  if (imp.includes("medium")) return "T2";
+function inferTier(name: string): "T1" | "T2" | "T3" {
+  const nm = name.toLowerCase();
+  if (IMPORTANT_KEYWORDS.some(k => nm.includes(k))) return "T1";
+  // You can expand here for T2 logic
   return "T3";
 }
 
-function asStr(v: any) {
-  if (v === null || v === undefined) return "—";
-  const s = String(v).trim();
-  return s === "" ? "—" : s;
-}
-
 export async function GET() {
-  const apiKey = process.env.FMP_API_KEY || "";
+  const apiKey = process.env.FRED_API_KEY || "";
+  if (!apiKey) {
+    return Response.json(
+      { items: [], stale: true, source: "FRED", error: "Missing FRED_API_KEY" },
+      { status: 200 }
+    );
+  }
+
   const today = toISODate(new Date());
 
-  // ✅ v4 endpoint (v3 is legacy / blocked)
-  const url = `https://financialmodelingprep.com/api/v4/economic-calendar?from=${today}&to=${today}&apikey=${apiKey || "demo"}`;
-
+  // 1) Which FRED release IDs have a release on 'today'?
+  const datesUrl = `https://api.stlouisfed.org/fred/releases/dates?api_key=${apiKey}&file_type=json&realtime_start=${today}&realtime_end=${today}&include_release_ids=true&offset=0&limit=1000`;
   try {
-    const res = await fetch(url, {
-      cache: "no-store",
-      headers: { "User-Agent": "Mozilla/5.0" },
-    });
-
-    if (!res.ok) {
-      const txt = await res.text().catch(() => "");
+    const datesRes = await fetch(datesUrl, { cache: "no-store", headers: { "User-Agent": "Mozilla/5.0" } });
+    if (!datesRes.ok) {
+      const t = await datesRes.text().catch(() => "");
       return Response.json(
-        { items: [], stale: true, source: "FMP v4", error: `HTTP ${res.status} ${txt.slice(0, 300)}` },
+        { items: [], stale: true, source: "FRED", error: `HTTP ${datesRes.status} ${t.slice(0,300)}` },
         { status: 200 }
       );
     }
+    const datesJson = (await datesRes.json()) as FredReleaseDatesResp;
+    const ids = (datesJson.release_dates || [])
+      .filter(d => d.date === today)
+      .map(d => d.release_id);
 
-    const json = (await res.json()) as FmpV4Row[] | { error?: string };
+    if (!ids.length) {
+      return Response.json({ items: [], stale: false, source: "FRED" });
+    }
 
-    // If FMP returns an object with error, surface it
-    if (!Array.isArray(json)) {
+    // 2) Pull details of all releases and filter to US/high-signal
+    const releaseListUrl = `https://api.stlouisfed.org/fred/releases?api_key=${apiKey}&file_type=json&limit=1000`;
+    const relRes = await fetch(releaseListUrl, { cache: "no-store", headers: { "User-Agent": "Mozilla/5.0" } });
+    if (!relRes.ok) {
+      const t = await relRes.text().catch(() => "");
       return Response.json(
-        { items: [], stale: true, source: "FMP v4", error: (json as any)?.error || "Unknown response" },
+        { items: [], stale: true, source: "FRED", error: `HTTP ${relRes.status} ${t.slice(0,300)}` },
         { status: 200 }
       );
     }
+    const relJson = (await relRes.json()) as FredReleaseListResp;
+    const byId = new Map<number, FredRelease>((relJson.releases || []).map(r => [r.id, r]));
 
-    const items: Row[] = (json || [])
-      .filter(x => (x.country || "").toUpperCase() === "US")
-      .map(x => {
-        // v4 often returns combined date (UTC). If missing time, UK will show "--:--".
-        let dt: Date | null = null;
-        if (x.date) {
-          // Some rows are "YYYY-MM-DD HH:mm:ss" -> treat as UTC
-          const iso = x.date.replace(" ", "T") + "Z";
-          const d = new Date(iso);
-          if (!isNaN(d.getTime())) dt = d;
-        }
-
+    const items: Row[] = ids
+      .map(id => byId.get(id))
+      .filter(Boolean)
+      .map(r => {
+        const name = (r as FredRelease).name || "US release";
+        const tier = inferTier(name);
         return {
-          timeUK: dt ? toUKTime(dt) : "—",
-          country: x.country || "US",
-          release: x.event || "Unnamed release",
-          actual: asStr(x.actual),
-          previous: asStr(x.previous),
-          consensus: asStr(x.consensus ?? x.estimate),
-          forecast: asStr(x.estimate ?? x.consensus),
-          tier: pickTier(x.event, x.impact),
+          timeUK: toUKTime(new Date(`${today}T13:30:00Z`)), // FRED doesn’t always give a time; default NY 8:30am → 13:30 UK (adjust as you like)
+          country: "US",
+          release: name,
+          actual: "—",
+          previous: "—",
+          consensus: "—",
+          forecast: "—",
+          tier,
         };
       })
-      // dedupe
-      .filter((r, i, arr) => arr.findIndex(k => k.release === r.release && k.timeUK === r.timeUK) === i)
-      // sort by time label
-      .sort((a, b) => a.timeUK.localeCompare(b.timeUK));
+      // Keep only Tier1/Tier2-ish names (you can widen later)
+      .filter(r => r.tier !== "T3")
+      .sort((a, b) => a.release.localeCompare(b.release));
 
-    return Response.json({ items, stale: false, source: "FMP v4" });
+    return Response.json({ items, stale: false, source: "FRED" });
   } catch (e) {
     return Response.json(
-      { items: [], stale: true, source: "FMP v4", error: (e as Error).message },
+      { items: [], stale: true, source: "FRED", error: (e as Error).message },
       { status: 200 }
     );
   }

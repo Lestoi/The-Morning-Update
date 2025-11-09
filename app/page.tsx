@@ -2,6 +2,7 @@
 import React from "react";
 import { headers } from "next/headers";
 
+// ------------------ Types ------------------
 type MacroRow = {
   time: string;
   country: string;
@@ -12,7 +13,7 @@ type MacroRow = {
   forecast: string | null;
   tier: "T1" | "T2" | "T3";
 };
-type MacroResp = { items?: MacroRow[]; stale?: boolean; source?: string; error?: string };
+type MacroResp = { items?: MacroRow[]; stale?: boolean; source?: string; error?: string; dateUsed?: string };
 
 type SentimentResp = {
   vix?: number | null;
@@ -37,7 +38,7 @@ type EarningsRow = {
 };
 type EarningsResp = { items?: EarningsRow[]; stale?: boolean; source?: string; error?: string };
 
-// Build an absolute URL from a relative path using the current request headers
+// ------------------ Helpers ------------------
 function abs(path: string): string {
   const h = headers();
   const host =
@@ -71,6 +72,29 @@ function cell(x: unknown): React.ReactNode {
   return s.length ? s : "—";
 }
 
+function todayIsoUK(): string {
+  const now = new Date();
+  const y = new Intl.DateTimeFormat("en-GB", { timeZone: "Europe/London", year: "numeric" }).format(now);
+  const m = new Intl.DateTimeFormat("en-GB", { timeZone: "Europe/London", month: "2-digit" }).format(now);
+  const d = new Intl.DateTimeFormat("en-GB", { timeZone: "Europe/London", day: "2-digit" }).format(now);
+  return `${y}-${m}-${d}`;
+}
+
+function formatUKDate(iso: string): string {
+  try {
+    return new Intl.DateTimeFormat("en-GB", {
+      timeZone: "Europe/London",
+      weekday: "short",
+      day: "2-digit",
+      month: "short",
+      year: "numeric",
+    }).format(new Date(iso));
+  } catch {
+    return iso;
+  }
+}
+
+// ------------------ Page ------------------
 export default async function Page() {
   const [macro, senti, earnings] = await Promise.all([
     getJSON<MacroResp>("/api/macro", { items: [], stale: true, source: "macro" }),
@@ -87,6 +111,7 @@ export default async function Page() {
 
   const macroItems = Array.isArray(macro.items) ? macro.items : [];
   const earningsItems = Array.isArray(earnings.items) ? earnings.items : [];
+  const isFallbackDate = macro?.dateUsed && macro.dateUsed !== todayIsoUK();
 
   return (
     <main className="min-h-screen bg-black text-neutral-200 px-6 py-8">
@@ -97,7 +122,20 @@ export default async function Page() {
       <section className="mb-8">
         <div className="rounded-xl bg-neutral-900/60 ring-1 ring-neutral-800">
           <div className="flex items-center justify-between px-4 py-3 border-b border-neutral-800">
-            <div className="font-medium">Major US data today</div>
+            <div className="flex items-center gap-2 font-medium">
+              <span>Major US data</span>
+              {macro?.dateUsed ? (
+                isFallbackDate ? (
+                  <span className="text-xs rounded-full bg-amber-500/15 text-amber-300 px-2 py-0.5">
+                    next release day: {formatUKDate(macro.dateUsed!)}
+                  </span>
+                ) : (
+                  <span className="text-xs rounded-full bg-emerald-500/15 text-emerald-300 px-2 py-0.5">
+                    today
+                  </span>
+                )
+              ) : null}
+            </div>
             <div className="text-xs text-neutral-400 space-x-2">
               <span className="inline-block rounded bg-red-900/40 px-2 py-0.5">Tier 1</span>
               <span className="inline-block rounded bg-amber-900/40 px-2 py-0.5">Tier 2</span>
@@ -154,7 +192,10 @@ export default async function Page() {
           {(macro?.error || macro?.stale) && (
             <div className="px-4 py-2 text-xs text-neutral-400 border-t border-neutral-800">
               Source: {macro?.source ?? "—"}{" "}
-              {macro?.error ? <span className="text-red-400">— {macro.error}</span> : null}
+              {macro?.dateUsed ? (
+                <>— fetched for <span className="font-medium">{formatUKDate(macro.dateUsed)}</span></>
+              ) : null}
+              {macro?.error ? <span className="text-red-400"> — {macro.error}</span> : null}
             </div>
           )}
         </div>

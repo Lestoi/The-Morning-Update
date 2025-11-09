@@ -1,132 +1,163 @@
-// /app/api/sentiment-snapshot/route.ts
-export const dynamic = "force-dynamic";
+// app/api/sentiment-snapshot/route.ts
+export const dynamic = 'force-dynamic';
 
-import { NextResponse } from "next/server";
+type AAIISnapshot = {
+  bulls: number | null;
+  bears: number | null;
+  asOf: string | null;
+};
 
-/** Tiny CSV -> array of rows. Skips empty lines, trims cells. */
-function parseCSV(text: string): string[][] {
-  return text
-    .split(/\r?\n/)
-    .map(l => l.trim())
-    .filter(l => l.length > 0)
-    .map(l =>
-      // naive split, OK for our simple sources
-      l.split(",").map(c => c.trim().replace(/^"|"$/g, ""))
-    );
+type Snapshot = {
+  vix: number | null;
+  putCall: number | null;
+  aaii: AAIISnapshot | null;
+  fearGreed: number | null; // placeholder if you wire it later
+  stale: boolean;
+  sources: string[];
+  updated?: string;
+};
+
+// ---- helpers ---------------------------------------------------------------
+
+function asNum(n: unknown): number | null {
+  const v = typeof n === 'string' ? Number(n) : (typeof n === 'number' ? n : NaN);
+  return Number.isFinite(v) ? v : null;
 }
 
-async function fetchText(url: string) {
-  const r = await fetch(url, {
-    // try to avoid over-aggressive bot blocking
-    headers: {
-      "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
-      "Accept": "text/csv, text/plain, */*",
-      "Cache-Control": "no-cache",
-      "Pragma": "no-cache",
-    },
-    // revalidate periodically, but allow manual refresh
-    next: { revalidate: 300 },
-  });
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
-  return r.text();
+// CSV splitter that handles quoted commas (simple but robust enough here)
+function splitCSVLine(line: string): string[] {
+  const out: string[] = [];
+  let cur = '';
+  let inQ = false;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (c === '"') {
+      if (inQ && line[i + 1] === '"') { cur += '"'; i++; }
+      else { inQ = !inQ; }
+    } else if (c === ',' && !inQ) {
+      out.push(cur); cur = '';
+    } else {
+      cur += c;
+    }
+  }
+  out.push(cur);
+  return out;
 }
 
-async function getVIX(): Promise<number | null> {
+function parseAAIICSV(csv: string): AAIISnapshot | null {
+  const lines = csv.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+  if (lines.length < 2) return null;
+
+  const header = splitCSVLine(lines[0]).map(h => h.toLowerCase());
+  const iBull = header.findIndex(h => h.includes('bull'));
+  const iBear = header.findIndex(h => h.includes('bear'));
+  const iDate = header.findIndex(h => h.includes('date'));
+  if (iBull === -1 || iBear === -1) return null;
+
+  // Use the last valid row
+  for (let i = lines.length - 1; i >= 1; i--) {
+    const cols = splitCSVLine(lines[i]);
+    const bulls = asNum(cols[iBull]);
+    const bears = asNum(cols[iBear]);
+    if (bulls !== null && bears !== null) {
+      const asOf = (iDate !== -1 && cols[iDate]) ? String(cols[iDate]) : null;
+      return { bulls, bears, asOf };
+    }
+  }
+  return null;
+}
+
+// Build absolute origin from request headers
+function originFromHeaders(): string {
+  // These are available in the Edge/Node runtime request context
+  // but we don't have direct access here, so we infer from env+headers
+  // We'll read standard proxy vars via globalThis (Next will inject them)
+  const h = (globalThis as any)?.headers?.();
+  let host: string | null = null;
+  let proto: string | null = null;
   try {
-    // Stooq daily quote CSV
-    // Header example: Symbol,Date,Time,Open,High,Low,Close,Volume
-    const url = "https://stooq.com/q/l/?s=%5Evix&f=sd2t2ohlcv&h&e=csv";
-    const csv = parseCSV(await fetchText(url));
-    if (csv.length < 2) return null;
-    const header = csv[0].map(h => h.toLowerCase());
-    const rows = csv.slice(1);
-    const last = rows[rows.length - 1];
-    // try to find column "close"
-    const closeIdx = header.findIndex(h => h === "close");
-    if (closeIdx === -1) return null;
-    const v = Number(last[closeIdx]);
-    return Number.isFinite(v) ? v : null;
+    host = h?.get?.('x-forwarded-host') || h?.get?.('host') || process.env.VERCEL_URL || null;
+    proto = h?.get?.('x-forwarded-proto') || (host && host.includes('localhost') ? 'http' : 'https') || 'https';
   } catch {
-    return null;
+    host = process.env.VERCEL_URL || 'localhost:3000';
+    proto = host.includes('localhost') ? 'http' : 'https';
+  }
+  return `${proto}://${host}`;
+}
+
+// ---- fetchers --------------------------------------------------------------
+
+// Stooq VIX daily CSV
+async function fetchVIX(): Promise<{ v: number | null; src: string }> {
+  try {
+    const u = 'https://stooq.com/q/d/l/?s=^vix&i=d';
+    const r = await fetch(u, { cache: 'no-store' });
+    if (!r.ok) return { v: null, src: 'Stooq (^VIX daily CSV)' };
+    const csv = await r.text();
+    const lines = csv.trim().split(/\r?\n/);
+    if (lines.length < 2) return { v: null, src: 'Stooq (^VIX daily CSV)' };
+    const last = lines[lines.length - 1].split(',');
+    const close = asNum(last[4]); // Date,Open,High,Low,Close,Volume
+    return { v: close, src: 'Stooq (^VIX daily CSV)' };
+  } catch {
+    return { v: null, src: 'Stooq (^VIX daily CSV)' };
   }
 }
 
-async function getPutCall(): Promise<number | null> {
+// CBOE total put/call ratio CSV
+async function fetchPutCall(): Promise<{ v: number | null; src: string }> {
   try {
-    // CBOE total put/call CSV
-    // https://cdn.cboe.com/api/put_call_ratio/total.csv
-    const url = "https://cdn.cboe.com/api/put_call_ratio/total.csv";
-    const csv = parseCSV(await fetchText(url));
-    if (csv.length < 2) return null;
-
-    const header = csv[0].map(h => h.toLowerCase());
-    const rows = csv.slice(1);
-    // Find last non-empty data row
-    const data = [...rows].reverse().find(r => r.every(c => c !== "")) ?? null;
-    if (!data) return null;
-
-    // CBOE header often has: date,total,index,equity, ...
-    let idx = header.findIndex(h => h === "total");
-    if (idx < 0 && data.length > 1) idx = 1; // fallback: second column
-
-    const val = Number(data[idx]);
-    return Number.isFinite(val) ? val : null;
+    const u = 'https://cdn.cboe.com/api/global/delayed_quotes/osc/pc.csv';
+    const r = await fetch(u, { cache: 'no-store' });
+    if (!r.ok) return { v: null, src: 'CBOE total put/call CSV' };
+    const csv = await r.text();
+    const lines = csv.trim().split(/\r?\n/);
+    if (lines.length < 2) return { v: null, src: 'CBOE total put/call CSV' };
+    // Find last numeric on the last line
+    const last = lines[lines.length - 1].split(',').map(s => s.trim()).reverse();
+    for (const cell of last) {
+      const n = asNum(cell);
+      if (n !== null) return { v: n, src: 'CBOE total put/call CSV' };
+    }
+    return { v: null, src: 'CBOE total put/call CSV' };
   } catch {
-    return null;
+    return { v: null, src: 'CBOE total put/call CSV' };
   }
 }
 
-async function getAAII(): Promise<{ bulls: number; bears: number } | null> {
+// AAII from your app's public CSV: /public/aaii.csv
+async function fetchAAII(): Promise<{ a: AAIISnapshot | null; src: string }> {
   try {
-    // AAII CSV; sometimes rate-limited / member-only; we just try gracefully
-    const url = "https://www.aaii.com/files/surveys/sentiment.csv";
-    const csv = parseCSV(await fetchText(url));
-    if (csv.length < 2) return null;
-
-    // Find columns that look like "Bullish %" and "Bearish %"
-    const header = csv[0].map(h => h.toLowerCase());
-    const rows = csv.slice(1);
-    const last = rows[rows.length - 1];
-
-    const bullIdx =
-      header.findIndex(h => h.includes("bull") && h.includes("%")) ??
-      header.findIndex(h => h.includes("bull"));
-    const bearIdx =
-      header.findIndex(h => h.includes("bear") && h.includes("%")) ??
-      header.findIndex(h => h.includes("bear"));
-
-    if (bullIdx < 0 || bearIdx < 0) return null;
-
-    const bulls = Number(String(last[bullIdx]).replace("%", ""));
-    const bears = Number(String(last[bearIdx]).replace("%", ""));
-    if (!Number.isFinite(bulls) || !Number.isFinite(bears)) return null;
-    return { bulls, bears };
+    const origin = originFromHeaders();
+    const url = `${origin}/aaii.csv`;
+    const r = await fetch(url, { cache: 'no-store' });
+    if (!r.ok) return { a: null, src: '/aaii.csv (fetch failed)' };
+    const csv = await r.text();
+    const snap = parseAAIICSV(csv);
+    return { a: snap, src: '/aaii.csv' };
   } catch {
-    return null;
+    return { a: null, src: '/aaii.csv (fetch failed)' };
   }
 }
+
+// ---- route -----------------------------------------------------------------
 
 export async function GET() {
-  const [vix, putCall, aaii] = await Promise.all([
-    getVIX(),
-    getPutCall(),
-    getAAII(),
-  ]);
+  const [vix, pcr, aaii] = await Promise.all([fetchVIX(), fetchPutCall(), fetchAAII()]);
 
-  const body = {
-    vix,
-    putCall,
-    aaii,            // { bulls, bears } | null
-    fearGreed: null, // proprietary; we’ll leave null until we add a safe source
-    stale: false,
-    sources: [
-      "Stooq (^VIX daily/quote CSV)",
-      "CBOE total put/call CSV",
-      "AAII sentiment CSV (best-effort)",
-    ],
-    updated: new Date().toISOString(),
+  const stale = (vix.v === null && pcr.v === null && aaii.a === null);
+  const sources = [vix.src, 'CBOE total put/call CSV', aaii.src];
+  const updated = new Date().toISOString();
+
+  const body: Snapshot = {
+    vix: vix.v,
+    putCall: pcr.v,
+    aaii: aaii.a,
+    fearGreed: null,
+    stale,
+    sources,
+    updated
   };
 
-  return NextResponse.json(body, { headers: { "Cache-Control": "no-store" } });
+  return Response.json(body, { status: 200 });
 }

@@ -18,18 +18,18 @@ function toNum(x: unknown): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
-function isYdayISO(dateStr?: string | null): boolean {
+function isNdaysAgoISO(dateStr?: string | null, daysBack: number = 1): boolean {
   if (!dateStr) return false;
   const d = new Date(dateStr);
   if (Number.isNaN(d.valueOf())) return false;
 
   const today = new Date();
   const utcToday = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()));
-  const yday = new Date(utcToday);
-  yday.setUTCDate(yday.getUTCDate() - 1);
+  const target = new Date(utcToday);
+  target.setUTCDate(target.getUTCDate() - Math.max(1, Math.floor(daysBack)));
 
   const dUTC = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
-  return dUTC.getTime() === yday.getTime();
+  return dUTC.getTime() === target.getTime();
 }
 
 function tagSessionHint(name?: string | null): "BMO" | "AMC" | "TBD" | null {
@@ -60,16 +60,13 @@ function parseCsv(text: string): CsvRow[] {
     for (let j = 0; j < s.length; j++) {
       const ch = s[j];
       if (ch === '"') {
-        // if we see a doubled quote while inside a quoted field, treat as literal quote
         if (inQ && s[j + 1] === '"') {
-          cur += '"';
-          j++;
+          cur += '"'; j++;
         } else {
           inQ = !inQ;
         }
       } else if (ch === "," && !inQ) {
-        row.push(cur);
-        cur = "";
+        row.push(cur); cur = "";
       } else {
         cur += ch;
       }
@@ -86,7 +83,7 @@ function parseCsv(text: string): CsvRow[] {
   return out;
 }
 
-export async function GET() {
+export async function GET(req: Request) {
   try {
     const key = process.env.ALPHA_VANTAGE_KEY;
     if (!key) {
@@ -96,7 +93,12 @@ export async function GET() {
       );
     }
 
-    // Ask AV for CSV; we still gracefully handle JSON/plain-text if they send it.
+    // Debug params for testing on weekends:
+    const urlIn = new URL(req.url);
+    const daysBack = Math.max(1, Number(urlIn.searchParams.get("daysBack") ?? "1"));
+    const wantRaw = urlIn.searchParams.get("raw") === "1";
+
+    // Request CSV (preferred). AV sometimes still returns text/json; we handle those too.
     const url = new URL("https://www.alphavantage.co/query");
     url.searchParams.set("function", "EARNINGS_CALENDAR");
     url.searchParams.set("horizon", "3month");
@@ -106,7 +108,6 @@ export async function GET() {
     const res = await fetch(url.toString(), { cache: "no-store", next: { revalidate: 0 } });
     const text = await res.text();
 
-    // Some AV responses are plain-text "Thank you for using Alpha Vantage" or rate-limit notes.
     const looksLikePlainError =
       /thank you for using alpha vantage/i.test(text) ||
       /standard api call frequency/i.test(text) ||
@@ -116,14 +117,7 @@ export async function GET() {
     let rows: CsvRow[] = [];
 
     if (!looksLikePlainError) {
-      // try CSV first (we requested it)
-      try {
-        rows = parseCsv(text);
-      } catch {
-        rows = [];
-      }
-
-      // if CSV parse yields nothing, try JSON as a fallback
+      try { rows = parseCsv(text); } catch { rows = []; }
       if (rows.length === 0) {
         try {
           const j: unknown = JSON.parse(text);
@@ -131,14 +125,20 @@ export async function GET() {
           if (Array.isArray(anyJ?.earningsCalendar)) rows = anyJ.earningsCalendar as CsvRow[];
           else if (Array.isArray(anyJ?.EarningsCalendar)) rows = anyJ.EarningsCalendar as CsvRow[];
           else if (Array.isArray(anyJ)) rows = anyJ as CsvRow[];
-        } catch {
-          // neither CSV nor JSON
-        }
+        } catch { /* ignore */ }
       }
     }
 
+    if (wantRaw) {
+      // Handy inspector
+      return new Response(
+        JSON.stringify({ rawCount: rows.length, example: rows[0] ?? null, note: looksLikePlainError ? "AV note/limit/plain text" : null }),
+        { status: 200, headers: { "content-type": "application/json" } }
+      );
+    }
+
     const mapped: OutItem[] = rows
-      .filter(r => isYdayISO(r.reportDate ?? (r as any).report_date))
+      .filter(r => isNdaysAgoISO(r.reportDate ?? (r as any).report_date, daysBack))
       .map(r => {
         const epsAct = toNum(r.epsReported ?? (r as any).eps_reported);
         const epsEst = toNum(r.epsEstimated ?? (r as any).eps_estimated);
@@ -146,7 +146,6 @@ export async function GET() {
         if (surprise === null && epsAct !== null && epsEst !== null && epsEst !== 0) {
           surprise = Number(((epsAct - epsEst) / Math.abs(epsEst) * 100).toFixed(1));
         }
-
         return {
           time: tagSessionHint(r.name),
           symbol: (r.symbol ?? "").trim() || null,

@@ -10,39 +10,50 @@ type Snapshot = {
   vix: number | null;
   putCall: number | null;
   aaii: { bull: number | null; bear: number | null } | null;
-  fearGreed: number | null; // placeholder if you later wire one in
+  fearGreed: number | null;
   stale: boolean;
   sources: string[];
   updated: string;
-  error?: string;
+  error?: string; // now only added if *everything* failed
 };
 
-async function fetchText(url: string): Promise<string> {
-  const r = await fetch(url, { cache: "no-store" });
-  if (!r.ok) throw new Error(`${url} -> HTTP ${r.status}`);
-  return await r.text();
+const UA =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119 Safari/537.36";
+
+async function fetchTextWithUA(url: string, timeoutMs = 10000): Promise<string> {
+  const ctrl = new AbortController();
+  const to = setTimeout(() => ctrl.abort(), timeoutMs);
+
+  try {
+    const r = await fetch(url, {
+      cache: "no-store",
+      headers: { "User-Agent": UA },
+      signal: ctrl.signal,
+    });
+    if (!r.ok) throw new Error(`${url} -> HTTP ${r.status}`);
+    return await r.text();
+  } finally {
+    clearTimeout(to);
+  }
 }
 
 function parseStooqVIX(csv: string): number | null {
-  // stooq CSV: Date,Open,High,Low,Close,Volume
-  // last line is the latest; Close is col index 4
+  // Date,Open,High,Low,Close,Volume  (latest is last row)
   const lines = csv.trim().split("\n");
-  const last = lines[lines.length - 1];
-  const parts = last.split(",");
-  const close = parts[4];
-  const v = Number(close);
+  if (lines.length < 2) return null;
+  const last = lines[lines.length - 1].split(",");
+  const v = Number(last[4]);
   return Number.isFinite(v) ? v : null;
 }
 
 function parseCboePutCall(csv: string): number | null {
-  // Very small/robust parser – find first cell that looks like a float < 5
-  // Many CBOE CSVs include a header row, then values.
+  // try to find first float in a plausible range
   const lines = csv.trim().split("\n");
   for (const line of lines.slice(1)) {
-    const cols = line.split(/,|;|\t/).map((s) => s.trim());
-    for (const cell of cols) {
-      const maybe = Number(cell);
-      if (Number.isFinite(maybe) && maybe > 0 && maybe < 5) return maybe;
+    const cells = line.split(/,|;|\t/).map((s) => s.trim());
+    for (const c of cells) {
+      const n = Number(c);
+      if (Number.isFinite(n) && n > 0 && n < 5) return n;
     }
   }
   return null;
@@ -54,7 +65,6 @@ async function readLocalCSV(fileName: string): Promise<string> {
 }
 
 function parseAAII(csv: string): { bull: number | null; bear: number | null } | null {
-  // Accepts headers like: DATE,BULLISH,NEUTRAL,BEARISH (case-insensitive)
   const lines = csv.trim().split("\n");
   if (lines.length < 2) return null;
 
@@ -64,7 +74,6 @@ function parseAAII(csv: string): { bull: number | null; bear: number | null } | 
 
   if (bullIdx === -1 || bearIdx === -1) return null;
 
-  // Use last row (assume latest is at bottom)
   const last = lines[lines.length - 1].split(",").map((c) => c.trim());
   const bull = Number(last[bullIdx]);
   const bear = Number(last[bearIdx]);
@@ -75,12 +84,11 @@ function parseAAII(csv: string): { bull: number | null; bear: number | null } | 
   };
 }
 
-// Multiple CBOE CSV candidates – we try in order until one works.
-// (These change sometimes; this keeps it resilient.)
+// Try several CBOE CSV endpoints (they change formats/locations occasionally)
 const CBOE_CSV_CANDIDATES = [
-  // Total put/call daily CSV (commonly mirrored/formatted by CBOE)
   "https://cdn.cboe.com/data/us/options/volume-ratios/totalpc.csv",
   "https://cdn.cboe.com/data/us/equity/pc-ratio.csv",
+  // add more mirrors here if needed later
 ];
 
 export async function GET() {
@@ -94,43 +102,42 @@ export async function GET() {
   let putCall: number | null = null;
   let aaii: { bull: number | null; bear: number | null } | null = null;
   let stale = false;
-  let error: string | undefined;
 
-  // 1) VIX (Stooq)
+  // 1) VIX
   try {
-    const vixCSV = await fetchText("https://stooq.com/q/d/l/?s=^vix&i=d");
+    const vixCSV = await fetchTextWithUA("https://stooq.com/q/d/l/?s=^vix&i=d");
     vix = parseStooqVIX(vixCSV);
-  } catch (e: any) {
+    if (vix == null) stale = true;
+  } catch {
     stale = true;
-    error = (error ? error + " | " : "") + `VIX: ${e?.message ?? "fetch failed"}`;
   }
 
-  // 2) Put/Call (CBOE; try multiple mirrors/endpoints)
-  if (!putCall) {
-    for (const url of CBOE_CSV_CANDIDATES) {
-      try {
-        const pc = await fetchText(url);
-        putCall = parseCboePutCall(pc);
-        if (putCall != null) break;
-      } catch (e) {
-        // try next
-      }
-    }
-    if (putCall == null) {
-      stale = true;
-      error = (error ? error + " | " : "") + "Put/Call: no CSV parsed";
+  // 2) Put/Call – try multiple mirrors
+  for (const url of CBOE_CSV_CANDIDATES) {
+    try {
+      const pc = await fetchTextWithUA(url);
+      putCall = parseCboePutCall(pc);
+      if (putCall != null) break;
+    } catch {
+      // try next
     }
   }
+  if (putCall == null) stale = true;
 
-  // 3) AAII (local public CSV: /public/aaii.csv)
+  // 3) AAII from /public/aaii.csv
   try {
-    const aaiiCSV = await readLocalCSV("aaii.csv");
-    aaii = parseAAII(aaiiCSV);
-  } catch (e: any) {
-    // Not fatal—just leave tile blank
+    const csv = await readLocalCSV("aaii.csv");
+    aaii = parseAAII(csv);
+    if (!aaii) stale = true;
+  } catch {
     stale = true;
-    error = (error ? error + " | " : "") + "AAII CSV not found or invalid";
   }
+
+  // Only set `error` if everything failed (so partial data doesn't show a scary banner)
+  const allFailed =
+    vix == null &&
+    putCall == null &&
+    (!aaii || (aaii.bull == null && aaii.bear == null));
 
   const body: Snapshot = {
     vix,
@@ -140,7 +147,7 @@ export async function GET() {
     stale,
     sources,
     updated: new Date().toISOString(),
-    ...(error ? { error } : {}),
+    ...(allFailed ? { error: "All sources unavailable right now." } : {}),
   };
 
   return NextResponse.json(body, { status: 200 });

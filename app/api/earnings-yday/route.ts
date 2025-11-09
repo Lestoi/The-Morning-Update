@@ -1,127 +1,120 @@
-// /app/api/earnings-yday/route.ts
+// app/api/earnings-yday/route.ts
 export const dynamic = 'force-dynamic';
 
-import { NextResponse } from 'next/server';
-
-type FinnhubEarnings = {
-  date: string;              // "2025-11-07"
-  symbol: string;            // "AAPL"
-  epsActual: number | null;  // may be null
-  epsEstimate: number | null;
-  surprise: number | null;         // absolute
-  surprisePercent: number | null;  // %
-  time?: 'bmo' | 'amc' | 'tbd' | string; // sometimes provided
-  name?: string;              // company name (sometimes present)
+type FinnhubEarning = {
+  date: string;                 // "2025-11-07"
+  symbol: string;               // "AAPL"
+  epsActual: number | null;     // may be null
+  epsEstimate: number | null;   // may be null
+  time?: string | null;         // "bmo", "amc", "tbd", sometimes undefined
+  surprise?: number | null;     // Finnhub sometimes provides this
+  surprisePercent?: number | null;
 };
 
 type OutRow = {
   time: 'BMO' | 'AMC' | 'TBD';
   symbol: string;
-  companyName: string | null;
+  companyName: string | null;   // we can enrich later
   epsActual: number | null;
   epsEstimate: number | null;
   surprisePct: number | null;
-  result: string | null; // "beat"/"miss"/"in-line" or null
+  mktCap: number | null;        // enrichment later
 };
 
-function toISODate(d: Date) {
+function toUSDate(d: Date): string {
   const y = d.getUTCFullYear();
   const m = String(d.getUTCMonth() + 1).padStart(2, '0');
   const day = String(d.getUTCDate()).padStart(2, '0');
   return `${y}-${m}-${day}`;
 }
 
-// crude “yesterday” in UTC; good enough for daily snapshots
-function yesterdayUTC() {
-  const d = new Date();
-  d.setUTCDate(d.getUTCDate() - 1);
-  return d;
+// Normalise Finnhub "time" → our enum
+function normaliseSession(t?: string | null): 'BMO' | 'AMC' | 'TBD' {
+  const v = (t ?? '').toLowerCase();
+  if (v === 'bmo') return 'BMO';
+  if (v === 'amc') return 'AMC';
+  return 'TBD';
 }
 
-function classifyResult(act: number | null, est: number | null): string | null {
-  if (typeof act !== 'number' || !Number.isFinite(act)) return null;
-  if (typeof est !== 'number' || !Number.isFinite(est)) return null;
-  if (Math.abs(est) < 1e-12) return 'in-line';
-  const diff = act - est;
-  // 1% band as “in-line”
-  const pct = (diff / Math.abs(est)) * 100;
-  if (pct > 1) return 'beat';
-  if (pct < -1) return 'miss';
-  return 'in-line';
+// Safe numeric parse → number | null
+function asNum(n: unknown): number | null {
+  const v = typeof n === 'string' ? Number(n) : (typeof n === 'number' ? n : NaN);
+  return Number.isFinite(v) ? v : null;
 }
 
 export async function GET() {
-  try {
-    const token = process.env.FINNHUB_API_KEY;
-    if (!token) {
-      return NextResponse.json(
-        { items: [], stale: true, source: 'Finnhub', error: 'Missing FINNHUB_API_KEY' },
-        { status: 200 }
-      );
-    }
+  const token = process.env.FINNHUB_API_KEY;
+  if (!token) {
+    return Response.json(
+      { items: [], stale: true, source: 'Finnhub', error: 'Missing FINNHUB_API_KEY' },
+      { status: 200 }
+    );
+  }
 
-    const y = toISODate(yesterdayUTC());
+  try {
+    // Yesterday in UTC (Finnhub calendar is date-based; yesterday is what we want)
+    const now = new Date();
+    const yday = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - 1));
+    const from = toUSDate(yday);
+    const to = from;
 
     const url = new URL('https://finnhub.io/api/v1/calendar/earnings');
-    url.searchParams.set('from', y);
-    url.searchParams.set('to', y);
+    url.searchParams.set('from', from);
+    url.searchParams.set('to', to);
     url.searchParams.set('token', token);
 
-    const r = await fetch(url.toString(), { next: { revalidate: 0 } });
+    const r = await fetch(url.toString(), { cache: 'no-store' });
     if (!r.ok) {
-      return NextResponse.json(
+      return Response.json(
         { items: [], stale: true, source: 'Finnhub', error: `HTTP ${r.status}` },
         { status: 200 }
       );
     }
 
-    const data: { earningsCalendar?: FinnhubEarnings[] } = await r.json();
+    const j = await r.json() as { earningsCalendar?: FinnhubEarning[] } | unknown;
 
-    const rows: OutRow[] = (data.earningsCalendar ?? [])
-      // filter obvious non-US if Finnhub includes them (most are US anyway)
-      .map((e) => {
-        const time =
-          e.time?.toLowerCase() === 'bmo' ? 'BMO' :
-          e.time?.toLowerCase() === 'amc' ? 'AMC' : 'TBD';
+    const arr: FinnhubEarning[] = Array.isArray((j as any)?.earningsCalendar)
+      ? (j as any).earningsCalendar
+      : [];
 
-        const epsAct = (typeof e.epsActual === 'number' && Number.isFinite(e.epsActual))
-          ? Number(e.epsActual.toFixed(2)) : null;
-        const epsEst = (typeof e.epsEstimate === 'number' && Number.isFinite(e.epsEstimate))
-          ? Number(e.epsEstimate.toFixed(2)) : null;
+    // Map to our unified shape
+    const rows: OutRow[] = arr.map((e: FinnhubEarning): OutRow => {
+      const time = normaliseSession(e.time);
+      const epsActual = asNum(e.epsActual);
+      const epsEstimate = asNum(e.epsEstimate);
 
-        let surprisePct: number | null = null;
-        if (typeof e.surprisePercent === 'number' && Number.isFinite(e.surprisePercent)) {
-          surprisePct = Number(e.surprisePercent.toFixed(1));
-        } else if (epsAct !== null && epsEst !== null && Math.abs(epsEst) > 1e-12) {
-          surprisePct = Number((((epsAct - epsEst) / Math.abs(epsEst)) * 100).toFixed(1));
-        }
+      // Prefer provider surprisePct if present, else compute
+      const surprisePct =
+        asNum((e as any).surprisePercent) ??
+        (Number.isFinite(epsActual) && Number.isFinite(epsEstimate) && epsEstimate! !== 0
+          ? Number((((epsActual! - epsEstimate!) / Math.abs(epsEstimate!)) * 100).toFixed(1))
+          : null);
 
-        const result = classifyResult(epsAct, epsEst);
+      return {
+        time,
+        symbol: e.symbol,
+        companyName: null, // enrichment later to avoid extra calls/rate limits
+        epsActual,
+        epsEstimate,
+        surprisePct,
+        mktCap: null
+      };
+    });
 
-        return {
-          time,
-          symbol: e.symbol,
-          companyName: e.name ?? null,
-          epsActual: epsAct,
-          epsEstimate: epsEst,
-          surprisePct,
-          result,
-        };
-      })
-      // keep it tidy: most notable first (has EPS + bigger surprise)
-      .sort((a, b) => {
-        const ap = Math.abs(a.surprisePct ?? 0);
-        const bp = Math.abs(b.surprisePct ?? 0);
-        return bp - ap;
-      });
+    // Light post-filter: keep plausible US tickers (reduce noise)
+    const filtered: OutRow[] = rows.filter(r => /^[A-Z.\-]{1,6}$/.test(r.symbol));
 
-    return NextResponse.json(
-      { items: rows, stale: false, source: 'Finnhub' },
+    // Sort (optional): AMC last, BMO first, TBD in middle
+    const order = { BMO: 0, TBD: 1, AMC: 2 } as const;
+    filtered.sort((a, b) => (order[a.time] - order[b.time]) || a.symbol.localeCompare(b.symbol));
+
+    return Response.json(
+      { items: filtered, stale: false, source: 'Finnhub' },
       { status: 200 }
     );
   } catch (err: any) {
-    return NextResponse.json(
-      { items: [], stale: true, source: 'Finnhub', error: err?.message ?? 'unknown error' },
+    return Response.json(
+      { items: [], stale: true, source: 'Finnhub', error: err?.message ?? 'fetch failed' },
       { status: 200 }
     );
   }

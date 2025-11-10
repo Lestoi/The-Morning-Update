@@ -20,7 +20,7 @@ type Snapshot = {
 const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119 Safari/537.36";
 
-async function fetchTextWithUA(url: string, timeoutMs = 12000): Promise<string> {
+async function fetchTextWithUA(url: string, timeoutMs = 15000): Promise<string> {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
@@ -36,7 +36,14 @@ async function fetchTextWithUA(url: string, timeoutMs = 12000): Promise<string> 
   }
 }
 
-function lastNumericInTail(csv: string, tailLines = 5): number | null {
+// ---- CSV helpers ------------------------------------------------------------
+
+function splitRow(raw: string): string[] {
+  // Accept comma, semicolon or tab
+  return raw.split(/,|;|\t/).map((s) => s.trim());
+}
+
+function lastNumericInTail(csv: string, tailLines = 6): number | null {
   const lines = csv
     .trim()
     .split("\n")
@@ -44,7 +51,7 @@ function lastNumericInTail(csv: string, tailLines = 5): number | null {
   if (lines.length < 2) return null;
   const tail = lines.slice(Math.max(1, lines.length - tailLines)); // skip header
   for (let i = tail.length - 1; i >= 0; i--) {
-    const parts = tail[i].split(/,|;|\t/).map((s) => s.trim());
+    const parts = splitRow(tail[i]);
     for (let j = parts.length - 1; j >= 0; j--) {
       const n = Number(parts[j]);
       if (Number.isFinite(n)) return n;
@@ -57,26 +64,25 @@ function parseStooqVIX(csv: string): number | null {
   // Date,Open,High,Low,Close,Volume — use Close from last data row
   const lines = csv.trim().split("\n");
   if (lines.length < 2) return null;
-  const last = lines[lines.length - 1].split(",");
+  const last = splitRow(lines[lines.length - 1]);
   const v = Number(last[4]);
   return Number.isFinite(v) ? v : null;
 }
 
-async function readLocalCSV(fileName: string): Promise<string> {
-  const full = path.join(process.cwd(), "public", fileName);
-  return await fs.readFile(full, "utf8");
-}
-
 function parseAAII(csv: string): { bull: number | null; bear: number | null } | null {
-  const lines = csv.trim().split("\n");
+  const lines = csv
+    .trim()
+    .split("\n")
+    .filter((l) => l.trim().length > 0);
   if (lines.length < 2) return null;
 
-  const header = lines[0].split(",").map((h) => h.trim().toLowerCase());
+  const header = splitRow(lines[0]).map((h) => h.toLowerCase());
+  // Match “bull”, “bullish” etc. and “bear”, “bearish”
   const bullIdx = header.findIndex((h) => h.includes("bull"));
   const bearIdx = header.findIndex((h) => h.includes("bear"));
   if (bullIdx === -1 || bearIdx === -1) return null;
 
-  const last = lines[lines.length - 1].split(",").map((c) => c.trim());
+  const last = splitRow(lines[lines.length - 1]);
   const bull = Number(last[bullIdx]);
   const bear = Number(last[bearIdx]);
 
@@ -86,11 +92,27 @@ function parseAAII(csv: string): { bull: number | null; bear: number | null } | 
   };
 }
 
-// Multiple CBOE CSV mirrors (they move these occasionally)
+// ---- Local / HTTP access to /public/aaii.csv --------------------------------
+
+async function readLocalCSV(fileName: string): Promise<string> {
+  const full = path.join(process.cwd(), "public", fileName);
+  return await fs.readFile(full, "utf8");
+}
+
+async function readPublicCSVOverHttp(fileName: string): Promise<string> {
+  // This lets us load the same file through Vercel’s static layer if FS access fails
+  const url = `${process.env.VERCEL_URL ? "https://" + process.env.VERCEL_URL : ""}/${fileName}`;
+  // If VERCEL_URL isn’t available (local dev), use relative
+  const final = process.env.VERCEL_URL ? url : `/${fileName}`;
+  const r = await fetchTextWithUA(final);
+  return r;
+}
+
+// ---- External sources -------------------------------------------------------
+
 const CBOE_CSV_CANDIDATES = [
   "https://cdn.cboe.com/data/us/options/volume-ratios/totalpc.csv",
   "https://cdn.cboe.com/data/us/options/volume-ratios/equitypc.csv",
-  // Old paths occasionally still work; keep as last resorts:
   "https://cdn.cboe.com/data/us/equity/pc-ratio.csv",
 ];
 
@@ -98,7 +120,7 @@ async function getPutCall(): Promise<number | null> {
   for (const url of CBOE_CSV_CANDIDATES) {
     try {
       const csv = await fetchTextWithUA(url);
-      const n = lastNumericInTail(csv, 6);
+      const n = lastNumericInTail(csv, 8);
       if (n != null && n > 0 && n < 5) return n;
     } catch {
       // try next
@@ -108,26 +130,49 @@ async function getPutCall(): Promise<number | null> {
 }
 
 async function getVIX(): Promise<number | null> {
-  // primary: Stooq (fast)
+  // Primary: Stooq
   try {
     const stooq = await fetchTextWithUA("https://stooq.com/q/d/l/?s=^vix&i=d");
     const v = parseStooqVIX(stooq);
     if (v != null) return v;
   } catch {
-    // fall through to Yahoo
+    // continue to Yahoo
   }
 
-  // fallback: Yahoo Finance CSV (historic download)
+  // Fallback: Yahoo Finance — IMPORTANT: encode ^VIX -> %5EVIX
   try {
     const nowSec = Math.floor(Date.now() / 1000);
-    const yahooUrl = `https://query1.finance.yahoo.com/v7/finance/download/^VIX?period1=0&period2=${nowSec}&interval=1d&events=history&includeAdjustedClose=true`;
+    const symbol = encodeURIComponent("^VIX"); // => %5EVIX
+    const yahooUrl = `https://query1.finance.yahoo.com/v7/finance/download/${symbol}?period1=0&period2=${nowSec}&interval=1d&events=history&includeAdjustedClose=true`;
     const csv = await fetchTextWithUA(yahooUrl);
-    const v = lastNumericInTail(csv, 6); // last close will be among final cells
+    const v = lastNumericInTail(csv, 8); // latest close somewhere in final cells
     return v;
   } catch {
     return null;
   }
 }
+
+async function getAAII(): Promise<{ bull: number | null; bear: number | null } | null> {
+  // Try filesystem first
+  try {
+    const csv = await readLocalCSV("aaii.csv");
+    const parsed = parseAAII(csv);
+    if (parsed) return parsed;
+  } catch {
+    // ignore
+  }
+  // Then via HTTP (works on Vercel even if FS read fails)
+  try {
+    const csv = await readPublicCSVOverHttp("aaii.csv");
+    const parsed = parseAAII(csv);
+    if (parsed) return parsed;
+  } catch {
+    // ignore
+  }
+  return null;
+}
+
+// ---- Handler ----------------------------------------------------------------
 
 export async function GET() {
   const sources: string[] = [
@@ -141,22 +186,14 @@ export async function GET() {
   let aaii: { bull: number | null; bear: number | null } | null = null;
   let stale = false;
 
-  // VIX
   vix = await getVIX();
   if (vix == null) stale = true;
 
-  // Put/Call
   putCall = await getPutCall();
   if (putCall == null) stale = true;
 
-  // AAII from /public/aaii.csv
-  try {
-    const csv = await readLocalCSV("aaii.csv");
-    aaii = parseAAII(csv);
-    if (!aaii) stale = true;
-  } catch {
-    stale = true;
-  }
+  aaii = await getAAII();
+  if (!aaii || (aaii.bull == null && aaii.bear == null)) stale = true;
 
   const allFailed =
     vix == null && putCall == null && (!aaii || (aaii.bull == null && aaii.bear == null));
